@@ -1,3 +1,7 @@
+# Operator detail for whoever maintains the deployment. Not user-facing, and it
+# names internal hosts and trees, so it stays out of a public repo.
+NOTES.local.md
+
 # Campaign scaffolding: the ledger/claims files that produced this skill.
 # Useful provenance, not part of the deliverable, and they name internal paths.
 .goal/
