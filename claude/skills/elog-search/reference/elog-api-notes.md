@@ -26,9 +26,10 @@ result set obtained through one is somebody else's read access wearing your name
 accounts are added to and removed from experiments automatically as beam time starts and
 ends, which no user can reproduce.
 
-The `ws-jwt` ingress validates tokens itself, before the application is reached. Whether
-it trusts a Dex token minted by `s3df login` is unconfirmed — that path in this skill is
-written to spec and untested.
+The `ws-jwt` ingress validates tokens itself, before the application is reached. It does
+trust a Dex token minted by `s3df login`: confirmed on 2026-08-14, where `--auth jwt`
+authenticated as the same account and returned the same 2240 readable experiments as the
+Kerberos path through `ws-kerb`.
 
 ## The application never authenticates
 

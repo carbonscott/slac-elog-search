@@ -192,17 +192,32 @@ Resolution order, all per-user, with **no shared-account fallback at any step**:
    cache such as `/tmp/krb5cc_18262_sMq1XS` and leaves `KRB5CCNAME` unset, so a script
    that reads only the default cache reports "no credential" while a valid one sits next
    to it. Tickets last about 24 h.
-2. **S3DF token** (`ws-jwt`) -- `~/.s3df-access-token`, written by `s3df login`, home
-   directory taken from the passwd database rather than `$HOME`. Tokens last 12 h.
-   *This path is written to spec but has not been exercised against the live ingress;*
-   *if it fails, use Kerberos.*
+2. **S3DF token** (`ws-jwt`) -- the token `s3df login` writes. Paths come from
+   **`S3DF_TOKEN_FILE`** and **`S3DF_TOKEN_META`**, the two variables that tool
+   documents in its own `--help`, defaulting to `~/.s3df-access-token` and
+   `~/.s3df-token.json`. Tokens last 12 h, and an **expired token counts as no
+   token**: the metadata records `expires_at`, so this is decided outright rather
+   than guessed, and `whoami` prints a real expiry instead of `unknown`. Verified
+   against the live `ws-jwt` ingress on 2026-08-14 — same account, same 2240
+   readable experiments as Kerberos.
+
+Both mechanisms resolve your home from **`$HOME` when `$HOME` is a directory you own**,
+and from the passwd database otherwise. Ownership is the test that matters: it rejects
+an inherited `$HOME` pointing into somebody else's tree, which is the sudo and batch
+case worth guarding against, while still working inside a container whose home is a
+scratch path the passwd database knows nothing about. Resolving from passwd
+unconditionally would disagree with `s3df login`, which writes from `$HOME` — a reader
+that resolves differently from its writer cannot find what the writer wrote. The same
+rule applies to the `~/.krb5cc*` leg of the Kerberos search.
 
 A credential file that is group- or world-readable is **refused**, and the message names
 the `chmod 600` that fixes it. Tokens are never printed, logged or echoed.
 
-The skill will not authenticate on your behalf -- `kinit` needs your password and
-`s3df login` needs a browser and MFA. When it finds nothing usable it prints
-`CREDENTIAL BLOCKED` and the exact command for you to run:
+The skill will not authenticate on your behalf -- `kinit` needs your password, and a
+*first* `s3df login` needs you at a browser. An expired token is cheaper than that:
+`s3df login` renews it from the stored refresh token with no browser at all. When the
+skill finds nothing usable it prints `CREDENTIAL BLOCKED` and the exact command for you
+to run:
 
 ```
 kinit <you>@SLAC.STANFORD.EDU        # Kerberos, ~24 h

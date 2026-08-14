@@ -75,12 +75,47 @@ class CredentialError(Exception):
 
 
 def _home_dir():
-    """The invoking user's home from the passwd database, not from $HOME.
+    """Where THIS user's state lives: $HOME when $HOME is really theirs.
 
-    $HOME is inherited and can point at another user's tree in a sudo or batch
-    context; the passwd entry for our real uid cannot.
+    This used to read passwd unconditionally, on the reasoning that $HOME is
+    inherited and can point at another user's tree in a sudo or batch context.
+    The threat is real; the remedy was too broad.  Passwd answers "who am I",
+    which is not the same question as "where is my state", and the two answers
+    diverge whenever the filesystem namespace can differ from the passwd
+    database -- the container case, where $HOME is a scratch home and passwd
+    still says /sdf/home.
+
+    It also disagreed with the tool that WRITES the credential.  s3df-login
+    resolves S3DF_TOKEN_FILE from $HOME; a reader resolving from passwd cannot
+    find what that writer wrote.
+
+    So: take $HOME when it is a directory owned by the invoking uid -- which
+    rejects exactly the inherited-someone-else's-$HOME case the original guard
+    was aimed at -- and fall back to passwd otherwise.
     """
+    home = os.environ.get("HOME")
+    if home:
+        try:
+            st = os.stat(home)
+            if stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid():
+                return home
+        except OSError:
+            pass
     return pwd.getpwuid(os.getuid()).pw_dir
+
+
+def _s3df_token_paths():
+    """(token, metadata) paths, resolved the way `s3df login` resolves them.
+
+    s3df-login documents S3DF_TOKEN_FILE and S3DF_TOKEN_META in its own --help
+    and defaults both from $HOME.  This reader honours the same two names with
+    the same precedence.  Inventing a parallel knob here (ELOG_S3DF_TOKEN_FILE
+    or similar) would guarantee drift: anyone who set the documented variable
+    would get a token that `s3df login` writes and this skill cannot find.
+    """
+    home = _home_dir()
+    return (os.environ.get("S3DF_TOKEN_FILE") or os.path.join(home, ".s3df-access-token"),
+            os.environ.get("S3DF_TOKEN_META") or os.path.join(home, ".s3df-token.json"))
 
 
 def _username():
@@ -228,12 +263,16 @@ def _resolve_kerberos():
 def _resolve_jwt():
     """The S3DF OAuth2 token written by `s3df login`.  Yours, mode 0600, or nothing.
 
-    UNTESTED against the live /ws-jwt/ ingress: no token existed on the host this
-    skill was built on, and a token cannot be minted without the user at a browser.
-    The ingress is known to be live and to validate tokens itself, but which issuer
-    and audience it trusts is unconfirmed.  If this path fails, use Kerberos.
+    Paths come from _s3df_token_paths(), so S3DF_TOKEN_FILE and S3DF_TOKEN_META
+    are honoured under the names their writer documents.
+
+    An expired token is treated as no token.  s3df-login records `expires_at`
+    (epoch seconds) in its metadata, so unlike a Kerberos cache this can be
+    decided outright rather than guessed at -- and `s3df login` renews from the
+    stored refresh_token without a browser, so the fix costs the user nothing.
+    Without that metadata the expiry is simply unknown and the token is tried.
     """
-    path = os.path.join(_home_dir(), ".s3df-access-token")
+    path, meta_path = _s3df_token_paths()
     try:
         st = os.lstat(path)
     except OSError:
@@ -242,18 +281,23 @@ def _resolve_jwt():
         return []
     _refuse_if_readable_by_others(path)
 
-    identity = None
-    meta_path = os.path.join(_home_dir(), ".s3df-token.json")
+    identity, expires = None, None
     if os.path.exists(meta_path):
         _refuse_if_readable_by_others(meta_path)
         try:
             with open(meta_path) as fh:
                 meta = json.load(fh)
             identity = meta.get("email") or meta.get("sub")
-        except (OSError, ValueError):
+            if meta.get("expires_at") is not None:
+                expires_at = float(meta["expires_at"])
+                if expires_at <= time.time():
+                    return []
+                expires = time.strftime("%m/%d/%Y %H:%M:%S",
+                                        time.localtime(expires_at))
+        except (OSError, ValueError, TypeError):
             pass
     return [{"mechanism": "jwt", "prefix": "ws-jwt", "cache": path,
-             "identity": identity or _username(), "expires": None}]
+             "identity": identity or _username(), "expires": expires}]
 
 
 def resolve_credential(prefer=None):
@@ -271,8 +315,8 @@ def resolve_credential(prefer=None):
     """
     # --auth FORCES a mechanism.  It used to be a preference, so `--auth jwt` on a
     # host with no token silently produced a Kerberos session and reported success
-    # -- the one flag that could test the untested JWT path could not report its
-    # own failure.
+    # -- the one flag that could exercise the JWT path could not report its own
+    # failure.  That flag is how the JWT path was finally verified.
     order = [prefer] if prefer else ["kerberos", "jwt"]
 
     candidates = []
@@ -286,20 +330,24 @@ def resolve_credential(prefer=None):
             "  Drop --auth to let the skill choose, or create that credential yourself."
             % (prefer, prefer,
                "Run: kinit %s@SLAC.STANFORD.EDU" % _username() if prefer == "kerberos"
-               else "Run: /sdf/sw/s3df-cli/bin/s3df login"))
+               else "Run: /sdf/sw/s3df-cli/bin/s3df login   "
+                    "(an expired token counts as absent here; that command renews\n"
+                    "  it from the stored refresh_token, without a browser)"))
 
     if not candidates:
         raise CredentialError(
             "no usable credential of your own was found for user '%s'.\n"
             "  Checked, for uid %d only: $KRB5CCNAME, /tmp/krb5cc_*, "
             "/run/user/%d/krb5cc*, %s/.krb5cc*, and %s\n"
-            "  This skill cannot authenticate for you -- kinit needs your password\n"
-            "  and s3df login needs a browser and MFA.  Run ONE of these yourself:\n"
+            "  This skill cannot authenticate for you -- kinit needs your password,\n"
+            "  and a FIRST s3df login needs you at a browser.  An expired token is\n"
+            "  cheaper: s3df login renews it from the stored refresh_token with no\n"
+            "  browser at all.  Run ONE of these yourself:\n"
             "      kinit %s@SLAC.STANFORD.EDU        # Kerberos, ~24 h\n"
             "      /sdf/sw/s3df-cli/bin/s3df login   # S3DF OAuth2 token, 12 h\n"
             "  then re-run this command."
             % (_username(), os.getuid(), os.getuid(), _home_dir(),
-               os.path.join(_home_dir(), ".s3df-access-token"), _username())
+               _s3df_token_paths()[0], _username())
         )
 
     best = candidates[0]
@@ -821,8 +869,10 @@ def cmd_whoami(args):
     print("identity            : %s" % cred["identity"])
     print("mechanism           : %s" % cred["mechanism"])
     print("credential source   : %s" % cred["cache"])
-    print("credential expires  : %s   (host local time, as klist reports it)"
-          % (cred.get("expires") or "unknown"))
+    print("credential expires  : %s   (host local time, %s)"
+          % (cred.get("expires") or "unknown",
+             "as klist reports it" if cred["mechanism"] == "kerberos"
+             else "from expires_at in the token metadata"))
     if cred.get("alternates"):
         print("other own credentials: %d also valid, unused -- %s"
               % (len(cred["alternates"]),

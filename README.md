@@ -95,9 +95,17 @@ the same steps from a local clone.
 The skill resolves, in order: your own Kerberos ticket cache under `/tmp` whose
 owner uid equals yours (checking sibling caches, not just the default — an ssh
 login with GSSAPI delegation leaves a valid ticket in a suffixed cache with
-`KRB5CCNAME` unset), then `~/.s3df-access-token`. There is no shared-account
-fallback at any step. A credential file that is group- or world-readable is
-refused with the `chmod 600` that fixes it. Tokens are never printed or logged.
+`KRB5CCNAME` unset), then the S3DF token. There is no shared-account fallback at
+any step. A credential file that is group- or world-readable is refused with the
+`chmod 600` that fixes it. Tokens are never printed or logged.
+
+Token paths come from **`S3DF_TOKEN_FILE`** and **`S3DF_TOKEN_META`** — the same
+two variables `s3df login` documents — and both sides default from `$HOME` when
+`$HOME` is a directory you own, falling back to the passwd database otherwise.
+Writer and reader resolve identically on purpose; a reader with its own private
+variable, or its own idea of where home is, cannot find what the writer wrote.
+That also means a container with a correct `$HOME` needs no bind mount: copy the
+skill in and export the two variables.
 
 Entry content is never written to disk. Only experiment metadata (names,
 instruments, dates) is cached, mode 0600 with a 6 h TTL.
