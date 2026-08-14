@@ -92,12 +92,16 @@ the same steps from a local clone.
 
 ## The credential is never shared
 
-The skill resolves, in order: your own Kerberos ticket cache under `/tmp` whose
-owner uid equals yours (checking sibling caches, not just the default — an ssh
-login with GSSAPI delegation leaves a valid ticket in a suffixed cache with
-`KRB5CCNAME` unset), then the S3DF token. There is no shared-account fallback at
-any step. A credential file that is group- or world-readable is refused with the
-`chmod 600` that fixes it. Tokens are never printed or logged.
+The skill authenticates with your own S3DF token (`ws-jwt`), written by
+`s3df login`. There is no shared-account fallback at any step. A credential file
+that is group- or world-readable is refused with the `chmod 600` that fixes it.
+Tokens are never printed or logged.
+
+A Kerberos ticket still works as an undocumented fallback, tried after the token
+and forced by `--auth kerberos`. SKILL.md does not mention it on purpose:
+Kerberos is expected to be phased out and cannot work in a container, so the
+skill should not be teaching `kinit` as the first move. The mechanics are kept in
+`reference/elog-api-notes.md` for whoever maintains that path.
 
 Token paths come from **`S3DF_TOKEN_FILE`** and **`S3DF_TOKEN_META`** — the same
 two variables `s3df login` documents — and both sides default from `$HOME` when

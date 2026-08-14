@@ -303,10 +303,14 @@ def _resolve_jwt():
 def resolve_credential(prefer=None):
     """Resolve the INVOKING USER's credential.  No shared-account fallback exists.
 
-    Order: Kerberos first (it is what works today), then the S3DF JWT.  Both are
-    per-user files owned by the caller.  There is deliberately no third option:
-    a skill that quietly falls back to a shared operator account would report
-    somebody else's read access as yours.
+    Order: the S3DF token (ws-jwt) first, then Kerberos.  The token is the
+    documented path and the only one that survives a container, so it leads.
+    Kerberos stays as an undocumented fallback -- it still works, and nobody
+    holding only a ticket should be locked out by a documentation decision --
+    and `--auth kerberos` forces it outright.  Both are per-user files owned by
+    the caller.  There is deliberately no third option: a skill that quietly
+    falls back to a shared operator account would report somebody else's read
+    access as yours.
 
     Returns the best candidate with the remaining ones attached as `alternates`,
     because "the cache holds a live TGT" and "the GSS library can build a header
@@ -317,7 +321,7 @@ def resolve_credential(prefer=None):
     # host with no token silently produced a Kerberos session and reported success
     # -- the one flag that could exercise the JWT path could not report its own
     # failure.  That flag is how the JWT path was finally verified.
-    order = [prefer] if prefer else ["kerberos", "jwt"]
+    order = [prefer] if prefer else ["jwt", "kerberos"]
 
     candidates = []
     for mech in order:
@@ -337,17 +341,15 @@ def resolve_credential(prefer=None):
     if not candidates:
         raise CredentialError(
             "no usable credential of your own was found for user '%s'.\n"
-            "  Checked, for uid %d only: $KRB5CCNAME, /tmp/krb5cc_*, "
-            "/run/user/%d/krb5cc*, %s/.krb5cc*, and %s\n"
-            "  This skill cannot authenticate for you -- kinit needs your password,\n"
-            "  and a FIRST s3df login needs you at a browser.  An expired token is\n"
-            "  cheaper: s3df login renews it from the stored refresh_token with no\n"
-            "  browser at all.  Run ONE of these yourself:\n"
-            "      kinit %s@SLAC.STANFORD.EDU        # Kerberos, ~24 h\n"
+            "  Checked, for uid %d only: %s\n"
+            "  (S3DF_TOKEN_FILE / S3DF_TOKEN_META move that path; an expired token\n"
+            "  counts as absent.)\n"
+            "  This skill cannot authenticate for you: a FIRST login needs you at a\n"
+            "  browser.  Renewing is cheaper -- the same command refreshes an expired\n"
+            "  token from the stored refresh_token, with no browser at all.  Run:\n"
             "      /sdf/sw/s3df-cli/bin/s3df login   # S3DF OAuth2 token, 12 h\n"
             "  then re-run this command."
-            % (_username(), os.getuid(), os.getuid(), _home_dir(),
-               _s3df_token_paths()[0], _username())
+            % (_username(), os.getuid(), _s3df_token_paths()[0])
         )
 
     best = candidates[0]
@@ -873,10 +875,15 @@ def cmd_whoami(args):
           % (cred.get("expires") or "unknown",
              "as klist reports it" if cred["mechanism"] == "kerberos"
              else "from expires_at in the token metadata"))
-    if cred.get("alternates"):
+    # Only alternates of the SAME mechanism are worth showing.  A fallback of a
+    # different mechanism is an implementation detail of resolution, not
+    # something the caller chooses between, and naming its file here would put a
+    # credential path in front of a user the documentation never mentions.
+    same = [c for c in cred.get("alternates", [])
+            if c["mechanism"] == cred["mechanism"]]
+    if same:
         print("other own credentials: %d also valid, unused -- %s"
-              % (len(cred["alternates"]),
-                 ", ".join(c["cache"] for c in cred["alternates"])))
+              % (len(same), ", ".join(c["cache"] for c in same)))
     print("endpoint prefix     : %s   (%s/%s/lgbk/lgbk/...)"
           % (cred["prefix"], BASE, cred["prefix"]))
     print("readable experiments: %d" % len(records))

@@ -31,6 +31,36 @@ trust a Dex token minted by `s3df login`: confirmed on 2026-08-14, where `--auth
 authenticated as the same account and returned the same 2240 readable experiments as the
 Kerberos path through `ws-kerb`.
 
+## Kerberos: still working, deliberately undocumented
+
+`ws-kerb` is tried only after the token, and SKILL.md does not mention it. That is a
+documentation decision, not a deprecation: Kerberos is expected to be phased out, it
+cannot be made to work in a container, and a skill whose first-line instructions send
+people to `kinit` teaches a habit with a shelf life. The code path stays because a ticket
+is a real credential and nobody holding one should be locked out — `--auth kerberos`
+forces it, and `whoami` will report `mechanism: kerberos` when the fallback fires.
+
+What that path knows, for whoever maintains it:
+
+* Own caches only. Every candidate is `lstat`ed before it is opened: not a regular file,
+  or `st_uid != getuid()`, and it is dropped — so a foreign cache in world-listable
+  `/tmp` never produces a permission error, and a symlink pointing at one is refused
+  rather than followed.
+* **The default cache is often the stale one.** An ssh login with GSSAPI delegation
+  drops a fresh ticket in a suffixed sibling such as `/tmp/krb5cc_18262_sMq1XS` and
+  leaves `KRB5CCNAME` unset, so a resolver reading only the default reports "no
+  credential" while a valid ticket sits beside it. `klist -l` and `klist -A` do not
+  help: with a FILE-type default they only show the cache already selected.
+* Validity is `klist -s`, never a parsed clock. `klist` prints local times with no zone
+  and no locale marker; comparing them to your own clock is guessing.
+* Searched, for the invoking uid only: `$KRB5CCNAME`, `/tmp/krb5cc_<uid>`,
+  `/tmp/krb5cc_*`, `/run/user/<uid>/krb5cc*`, `~/.krb5cc*` — the last using the same
+  owned-`$HOME` rule as the token paths. Tickets last about 24 h.
+* Candidates are sorted most-distant-expiry first, and the losers ride along as
+  `alternates`: "the cache holds a live TGT" and "the GSS library can build a header
+  from it" are different tests, and the right answer when the second fails is the next
+  cache, not an error.
+
 ## The application never authenticates
 
 `flask_authnz.FlaskAuthnz.get_current_user_id` reads a proxy header

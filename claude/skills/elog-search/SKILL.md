@@ -1,6 +1,6 @@
 ---
 name: elog-search
-description: Search the LCLS eLog (pswww logbook) across experiments, read-only, using the invoking user's own Kerberos ticket or S3DF token. Use when asked what the elog / logbook says about a topic, error, sample, detector or shift, or to find eLog entries by text, tag, run or date. Always reports which experiments it searched and why.
+description: Search the LCLS eLog (pswww logbook) across experiments, read-only, using the invoking user's own S3DF token. Use when asked what the elog / logbook says about a topic, error, sample, detector or shift, or to find eLog entries by text, tag, run or date. Always reports which experiments it searched and why.
 ---
 
 # elog-search
@@ -42,7 +42,7 @@ So every result set here carries a **scope line** stating how many experiments w
 searched, out of how many you may read, and how that set was chosen:
 
 ```
-SCOPE: searched 113 of 2240 experiments readable as cwang31@SLAC.STANFORD.EDU (ws-kerb)
+SCOPE: searched 111 of 2240 experiments readable as cwang31 (ws-jwt)
   selection: active within 180 days (last run start) INTERSECT readable by you
   caveat   : recency is keyed on the last RUN start time, so an experiment with recent
              eLog activity but no new runs is not in this set
@@ -184,60 +184,56 @@ is never mistaken for context.
 
 ## Credential: yours, or none
 
-Resolution order, all per-user, with **no shared-account fallback at any step**:
+The skill authenticates with **your own S3DF token** (`ws-jwt`) — the one
+`/sdf/sw/s3df-cli/bin/s3df login` writes. There is **no shared-account fallback at any
+step**: a skill that quietly used an operator account would report somebody else's read
+access as yours.
 
-1. **Kerberos** (`ws-kerb`) -- your own ticket caches under `/tmp` whose owner uid equals
-   yours, most-distant expiry first. The default cache is checked *and so are its
-   siblings*: an ssh login with GSSAPI delegation drops a fresh ticket in a suffixed
-   cache such as `/tmp/krb5cc_18262_sMq1XS` and leaves `KRB5CCNAME` unset, so a script
-   that reads only the default cache reports "no credential" while a valid one sits next
-   to it. Tickets last about 24 h.
-2. **S3DF token** (`ws-jwt`) -- the token `s3df login` writes. Paths come from
-   **`S3DF_TOKEN_FILE`** and **`S3DF_TOKEN_META`**, the two variables that tool
-   documents in its own `--help`, defaulting to `~/.s3df-access-token` and
-   `~/.s3df-token.json`. Tokens last 12 h, and an **expired token counts as no
-   token**: the metadata records `expires_at`, so this is decided outright rather
-   than guessed, and `whoami` prints a real expiry instead of `unknown`. Verified
-   against the live `ws-jwt` ingress on 2026-08-14 — same account, same 2240
-   readable experiments as Kerberos.
+Paths come from **`S3DF_TOKEN_FILE`** and **`S3DF_TOKEN_META`**, the two variables that
+tool documents in its own `--help`, defaulting to `~/.s3df-access-token` and
+`~/.s3df-token.json`. Tokens last 12 h, and an **expired token counts as no token**: the
+metadata records `expires_at`, so this is decided outright rather than guessed, and
+`whoami` prints a real expiry instead of `unknown`.
 
-Both mechanisms resolve your home from **`$HOME` when `$HOME` is a directory you own**,
-and from the passwd database otherwise. Ownership is the test that matters: it rejects
-an inherited `$HOME` pointing into somebody else's tree, which is the sudo and batch
-case worth guarding against, while still working inside a container whose home is a
-scratch path the passwd database knows nothing about. Resolving from passwd
-unconditionally would disagree with `s3df login`, which writes from `$HOME` — a reader
-that resolves differently from its writer cannot find what the writer wrote. The same
-rule applies to the `~/.krb5cc*` leg of the Kerberos search.
+Home is resolved from **`$HOME` when `$HOME` is a directory you own**, and from the
+passwd database otherwise. Ownership is the test that matters: it rejects an inherited
+`$HOME` pointing into somebody else's tree, which is the sudo and batch case worth
+guarding against, while still working inside a container whose home is a scratch path
+the passwd database knows nothing about. Resolving from passwd unconditionally would
+disagree with `s3df login`, which writes from `$HOME` — a reader that resolves
+differently from its writer cannot find what the writer wrote. **In a container this
+means no bind mount is needed**: copy the skill in and export the two variables.
 
 A credential file that is group- or world-readable is **refused**, and the message names
 the `chmod 600` that fixes it. Tokens are never printed, logged or echoed.
 
-The skill will not authenticate on your behalf -- `kinit` needs your password, and a
-*first* `s3df login` needs you at a browser. An expired token is cheaper than that:
-`s3df login` renews it from the stored refresh token with no browser at all. When the
-skill finds nothing usable it prints `CREDENTIAL BLOCKED` and the exact command for you
-to run:
+The skill will not authenticate on your behalf. A *first* `s3df login` needs you at a
+browser; an expired token is cheaper, renewing from the stored refresh token with no
+browser at all. When the skill finds nothing usable it prints `CREDENTIAL BLOCKED` and
+the exact command for you to run:
 
 ```
-kinit <you>@SLAC.STANFORD.EDU        # Kerberos, ~24 h
 /sdf/sw/s3df-cli/bin/s3df login      # S3DF OAuth2 token, 12 h
 ```
 
 ### Never announce a missing credential you have not observed
 
-**Do not tell the user to run `kinit` unless a command you actually ran just failed on the
-credential.** Most users on an S3DF node already have a live ticket, and being told to
-redo setup they never needed is worse than useless. If you are unsure whether auth works,
-run one cheap command and read the output:
+**Do not tell the user to log in unless a command you actually ran just failed on the
+credential.** Most users on an S3DF node already hold a usable credential, and being told
+to redo setup they never needed is worse than useless. If you are unsure whether auth
+works, run one cheap command and read the output:
 
 ```bash
 scripts/elogsearch.py whoami
 ```
 
-A principal name and a non-zero experiment count means auth is fine — proceed with the
-real query. Only a command that exited with `CREDENTIAL BLOCKED` makes the setup
-instructions relevant, and when that happens, quote the error you actually got.
+An identity and a non-zero experiment count means auth is fine — proceed with the real
+query. Only a command that exited with `CREDENTIAL BLOCKED` makes the setup instructions
+relevant, and when that happens, quote the error you actually got.
+
+If `whoami` reports a `mechanism` other than `jwt`, that is a working fallback for hosts
+configured differently. It is not a problem and needs no action from you: report the
+results, not the mechanism.
 
 Run scripts with **`uv`**, which the shebang does for you (`#!/usr/bin/env -S uv run
 --script`). The system `python3` on some SLAC login nodes is too old, and the script
@@ -336,5 +332,5 @@ that would change that -- rather than "there is nothing in the eLog".
 
 Shared deployment and per-user setup are separate steps. Deployment is one world-readable
 copy of this directory; there is nothing per-user in it, because the credential comes
-from the invoking user's own ticket cache or token file at run time. Each user's own
-setup is exactly one command -- `kinit` or `s3df login` -- run by that user.
+from the invoking user's own token file at run time. Each user's own setup is exactly
+one command -- `s3df login` -- run by that user.
