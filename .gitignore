@@ -1,0 +1,14 @@
+# Campaign scaffolding: the ledger/claims files that produced this skill.
+# Useful provenance, not part of the deliverable, and they name internal paths.
+.goal/
+.ai/
+.claude/
+
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+
+# Nothing here should ever hold eLog entry content or a credential.
+*.token
+.s3df-access-token

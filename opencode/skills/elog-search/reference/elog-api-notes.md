@@ -1,0 +1,149 @@
+# LCLS eLog API notes
+
+Background for anyone extending `elogsearch.py`. Everything here is about *reading*.
+
+## Host and prefixes
+
+Base host `https://pswww.slac.stanford.edu`, SLAC-internal only. The path shape has a
+doubled `lgbk`:
+
+```
+{prefix}/lgbk/lgbk/ws/{call}                     global calls
+{prefix}/lgbk/lgbk/{experiment_id}/ws/{call}     experiment-scoped calls
+                                                 -- the `_id`, never the `name`
+```
+
+| Prefix | Authentication | Observed unauthenticated response |
+|---|---|---|
+| `ws` | none | `403` on any route needing an identity; anonymous routes work |
+| `ws-kerb` | SPNEGO / Kerberos | `401 WWW-Authenticate: Negotiate` |
+| `ws-jwt` | Bearer token | `401 {"error":"Unauthorized"}`; `{"error":"Invalid token"}` for a malformed bearer |
+| `ws-auth` | HTTP Basic, **shared hutch operator accounts** | `401 Basic realm` |
+| `ws-token` | browser SSO | `302` to vouch.slac.stanford.edu |
+
+`ws-auth` is deliberately unused by this skill: those are shared operator accounts, so a
+result set obtained through one is somebody else's read access wearing your name, and the
+accounts are added to and removed from experiments automatically as beam time starts and
+ends, which no user can reproduce.
+
+The `ws-jwt` ingress validates tokens itself, before the application is reached. Whether
+it trusts a Dex token minted by `s3df login` is unconfirmed — that path in this skill is
+written to spec and untested.
+
+## The application never authenticates
+
+`flask_authnz.FlaskAuthnz.get_current_user_id` reads a proxy header
+(`REMOTE-USER` by default); the reverse proxy in front of each prefix authenticates and
+sets it. Authorization is then `has_slac_user_role(user, 'LogBook', role, experiment,
+instrument)`, cached per role and experiment in the Flask session.
+
+Consequence worth knowing: the authorization behaviour is identical whichever
+authenticated prefix you use, so moving from Kerberos to JWT changes header construction
+and nothing else.
+
+## Reading routes used by this skill
+
+| Route | Auth | Returns |
+|---|---|---|
+| `ws/experiments` | read | every experiment **the caller may read** — the authorization boundary, made visible |
+| `ws/get_cached_experiment_names` | none | all experiment names |
+| `ws/experiment_names_updated_within?offset_secs=N` | none | names whose last run started within N seconds |
+| `<exp>/ws/search_elog` | read on that experiment | matching entries, whole documents |
+
+`ws/api_endpoints` (authenticated) returns every route with its docstring — the cheapest
+way to re-derive the API surface.
+
+## search_elog semantics
+
+Parameters: `search_text`, `run_num`, `start_run_num`, `end_run_num`, `start_date`,
+`end_date` (`%Y-%m-%dT%H:%M:%S.%fZ`), `tag`, `_id`. Inside `search_text`, a `t:` prefix
+searches tags and `x:` is a regex.
+
+* **No limit and no pagination.** A broad query returns every matching document.
+* **The only text index is `[('content','text'), ('title','text')]`.** Author and tag are
+  not indexed; the server special-cases a `search_text` that exactly equals a known author
+  or a known tag before falling back to text search. Measured behaviour of the three paths:
+  content and title are case-insensitive, OR-of-terms and **stemmed** (Snowball English —
+  `aligned` matches "alignment", `moved` matches "moving"); tags are **case-sensitive**,
+  exact and not tokenised (`SCREENSHOT` != `screenshot`, `SHIFT_GOALS` is not found by
+  `GOALS`); author is exact. The `x:` regex prefix is **case-sensitive** — it is the
+  server's internal miss-fallback regex that is case-insensitive, which is a different
+  mechanism.
+* **An empty `search_text` returns the entire collection** — 2953 entries and 7.2 MB from
+  one instrument logbook.
+* **A miss triggers a fallback regex scan, and it is observable.** When the `$text` query
+  returns nothing the server re-queries with a case-insensitive unanchored `$regex`, which
+  is a collection scan. Measured 2026-08-14 (TTFB, medians of 3): on ordinary
+  per-experiment logbooks a miss costs 0.8-1.3x a hit, i.e. nothing — but on the 14
+  standing operational logbooks it costs **2.1-5.4x**, worst 0.29 s on XPP_Instrument
+  against a 0.057 s hit. Absolute cost stays under 0.3 s throughout.
+  An earlier round of this work measured only experiments ranked by `run_count` and
+  concluded misses were free. The standing logbooks all have `run_count` 0, so that
+  ranking structurally excluded every collection where the penalty lives. Beware any
+  "largest experiment" ranking built on `run_count`, and beware sizing a collection by how
+  many documents a common term returns: "run" undercounts AMO_Instrument 12.9x
+  (229 returned against 2953 held) and Sample_Delivery_System 12.7x.
+* **The regex is a FALLBACK, not a union.** Tested directly: xpp101605526 contains base64
+  documents whose raw bytes hold "scan", yet a search for `scan` returned 171 documents,
+  all genuine word matches, with zero bytes of base64 in the returned set — those
+  documents were not returned. The same collection searched for `clog`, which has no
+  genuine matches, returned 3 documents matching only inside base64. So the regex runs
+  only when the text query finds nothing. (Not excluded: a result-count threshold rather
+  than strict zero would look identical in this data.)
+* **Whole documents come back**, not excerpts, so there is no second fetch per hit.
+  Content is **HTML**, despite `content_type` reading `TEXT`: image-bearing entries are
+  `<p><img src="data:image/png;base64,...">` and can run to hundreds of kilobytes of
+  base64. Strip tags and data URIs before matching or excerpting.
+
+Entry document fields: `_id`, `insert_time`, `relevance_time`, `author`, `content`,
+`content_type`, and optionally `title`, `tags`, `run_num`, `shift`, `attachments`,
+`root`, `parent`, `post_to_elogs`, `jira_ticket`, `deleted_by`, `deleted_time`.
+Cross-posted copies also carry `src_id` and `src_expname`.
+
+Responses are wrapped: `{"success": true, "value": [...]}`.
+
+A nonexistent experiment name returns `404`.
+
+## Two behaviours that will mislead a reader
+
+**Logical deletion.** The delete route sets `deleted_by` and `deleted_time`; no read query
+filters on either, and the web UI hides them client-side. Anything reading the API
+directly must suppress them itself or it will quote back entries that were deliberately
+removed.
+
+**Thread hydration.** After matching, `search_elog_for_text` walks each hit's `root` and
+`parent` until closure and adds those ancestors to the result set. They do not match the
+query and are otherwise indistinguishable from hits. A root entry has no `root` field of
+its own — it is identified by *other* documents pointing at it — so an ancestor is
+detected as: a returned document referenced by another returned document's `root`/`parent`
+that does not itself match the query.
+
+## Corpus shape
+
+Each experiment is its own MongoDB database with an `elog` collection inside it. That is
+the architectural reason no cross-experiment search route exists, and why searching
+"the eLog" is a fan-out the client has to scope.
+
+Beyond the per-experiment logbooks there are instrument-level logbooks (they appear in
+`ws/experiments` alongside experiments — `AMO_Instrument` and friends) and site-spanning
+logbooks such as the sample-delivery log, resolved through `get_instrument_elogs`. They
+hold the operational content that spans experiments and are often what someone is
+actually looking for, and **this skill can search them**: name them with `--experiments`,
+in either spelling.
+
+Fourteen of the 2240 have a `name` that differs from their `_id` by containing a space
+(`Sample Delivery System` versus `Sample_Delivery_System`), and the spaced form in a URL
+path returns HTTP 500 — so a client that builds paths from `name` rather than `_id`
+silently loses exactly these fourteen, which are the most valuable ones.
+
+Most of the corpus is dormant — the archive spans about fifteen years — so "search
+everything" mostly means "scan fifteen years of archives", which is a different question
+from "what did the last shift say".
+
+## Rate limits
+
+30 sequential anonymous GETs to a trivial route took 0.87 s (~34 req/s) with no `429`.
+That was the anonymous prefix against a trivial route: an authenticated `search_elog`
+does real database work, so the per-request *cost* is far higher even where the request
+*budget* looks unpoliced. Published guidance for polling loops is "every few seconds or
+slower is fine". This skill fans out at a fixed concurrency of 4.
