@@ -1,11 +1,16 @@
 # elog-search
 
-Ask Claude what the eLog says and get answers that name the experiment, the
-author and the time — and state exactly what was searched.
+Ask Claude about an experiment and get a grounded answer: what the eLog says,
+which runs there were and how the detectors were configured, which files landed,
+which sample was mounted, why an analysis job died — each answer naming the
+experiment, the author and the time, and stating exactly what was looked at.
 
-It searches the LCLS eLog **live**, as you, read-only. It sees every experiment
+It reads the LCLS logbook **live**, as you, read-only. It sees every experiment
 your own account can read, and it never quotes back an entry somebody deleted.
-Works in Claude Code and in the shared LCLS opencode install.
+Full-text search is one of the things it does, not the whole of it: most
+questions about an experiment are answered by the run table, the file list or
+the job log rather than by grepping prose. Works in Claude Code and in the
+shared LCLS opencode install.
 
 ---
 
@@ -39,7 +44,15 @@ are done.
 
 > `@elog-search` what does the elog say about jet clogs in mfx?
 
-> `@elog-search` which detectors were used in mfx101592326?
+> `@elog-search` which detectors were used in mfx101592326, and at what settings?
+
+> `@elog-search` which runs of cxilv4418 used sample GFP, and did they write xtc?
+
+> `@elog-search` job 65f3a1 in mfxlv4920 failed — what does its log say?
+
+That last one is the shape worth knowing about: the skill proxies a single call
+to the job daemon (`workflows <exp> --job ID --action job_log_file`) and reads
+the log back, so "why did that analysis fail" is a question you can just ask.
 
 ---
 
@@ -66,6 +79,10 @@ labelled thread context.
 
 ```
 claude/skills/elog-search/     for Claude Code users
+  scripts/elogsearch.py                the whole tool
+  reference/elog-api-notes.md          the API as it actually behaves
+  reference/explgbk-get-routes.txt     upstream's own route list, vendored so
+                                       selftest can pin the policy against it
 opencode/skills/elog-search/   identical copy, for the shared opencode tree
 install.sh                     deploys either one; --help for flags
 ```
@@ -78,10 +95,30 @@ be in step before you commit.
 
 ## Under the hood
 
-It queries the logbook's own search route per experiment, with your token, and
-never writes entry text to disk. Every HTTP call goes through one function that
-refuses any route outside a four-entry read-only allowlist, so no code path can
-create, edit or delete an entry.
+It calls the logbook's own routes with your token, and never writes entry text
+to disk; saving an attachment takes an explicit `--out`.
+
+Every HTTP call goes through one function, and that function decides by
+**effect, not by HTTP method**. The logbook service answers GET on routes that
+end runs, close shifts, cross-post entries, kill analysis jobs and rebuild
+caches — a tool that allowed every GET could do all of that to the production
+logbook during beam time. So all 117 GET-accepting routes are classified in the
+source: 87 read-only and callable, 26 that accept GET and change state, and 4
+that are read-only by the letter of the rule but refused anyway, each for a
+named reason — they leave the logbook, mint a credential, or have nothing to
+read. Anything outside the read-only set is refused before a URL is built, let
+alone a socket opened.
+
+`elogsearch.py routes` prints that inventory. `elogsearch.py selftest` proves
+the refusals with no credential and no network, and fails if the vendored copy
+of upstream's route list has drifted from the classification — a check on this
+repo's own two files, which catches a classification edit that forgets to
+re-vendor, not an upstream release. The one weakness of a deny-list model — a
+future release adding a 27th mutating GET — is covered by the choke point
+itself: a route absent from the inventory is refused, so anything new upstream
+is denied until somebody classifies it. Re-vendoring after an explgbk upgrade
+is a manual step, and a route whose handler turns mutating while keeping its
+rule is invisible to both.
 
 [reference/elog-api-notes.md](claude/skills/elog-search/reference/elog-api-notes.md)
 has the endpoint prefixes, the entry document shape, the server-side search
