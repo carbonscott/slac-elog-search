@@ -2393,8 +2393,19 @@ def cmd_runtable(args):
             return 1
         if args.out:
             replaced = _refuse_overwrite(args.out, getattr(args, "force", False))
-            with open(args.out, "w") as handle:
-                handle.write(response.text)
+            # The server's own bytes, not a decode/re-encode round trip.
+            # `response.text` is requests' DECODED string, and requests falls
+            # back to ISO-8859-1 for a text/* response carrying no charset, so a
+            # UTF-8 CSV of user-entered sample names would be saved as mojibake
+            # with nothing raised.  Worse, `open(..., "w")` re-encodes with the
+            # locale encoding: under LC_ALL=C -- ordinary for batch and cron on
+            # the login nodes -- that raises UnicodeEncodeError, a ValueError
+            # subclass, so main()'s ValueError arm catches it before the OSError
+            # arm and prints a local encoding failure in this skill's REFUSING:
+            # vocabulary with exit 2.  Bytes to a binary handle avoid both, and
+            # they are what the --out-without---csv refusal above promises.
+            with open(args.out, "wb") as handle:
+                handle.write(response.content)
             print("%-10s : %s" % ("overwrote" if replaced else "saved", args.out))
             return 0
         print(_no_control(_clip(response.text, args.chars)))
@@ -4234,6 +4245,43 @@ def _selftest_commands():
         except ValueError as exc:
             results.append(("--table" in str(exc), label,
                             "" if "--table" in str(exc) else "\n     %s" % exc))
+
+        # runtable --csv --out must save the SERVER'S bytes.  This fake is the
+        # real shape: a text/csv response with no charset, which requests
+        # decodes as ISO-8859-1, so .text is mojibake and re-encoding it either
+        # saves the mojibake or raises UnicodeEncodeError under LC_ALL=C.
+        csv_bytes = "run,sample\n1,\u00b5-jet 5\u00c5\n".encode("utf-8")
+
+        class _CsvResponse(object):
+            status_code = 200
+            headers = {"Content-Type": "text/csv"}
+            content = csv_bytes
+            text = csv_bytes.decode("iso-8859-1")
+
+            def close(self):
+                pass
+
+        out_path = os.path.join(home, "export.csv")
+        globals()["_get"] = lambda *a, **k: _CsvResponse()
+        args = _Args()
+        for key, value in {"table": "T", "sources": False, "csv": True,
+                           "sample": None, "out": out_path, "force": False}.items():
+            setattr(args, key, value)
+        label = "runtable --csv --out saves the server's own bytes, not a re-encode"
+        try:
+            with _contextlib.redirect_stdout(_io.StringIO()):
+                cmd_runtable(args)
+            with open(out_path, "rb") as handle:
+                saved_bytes = handle.read()
+            results.append((saved_bytes == csv_bytes, label,
+                            "" if saved_bytes == csv_bytes
+                            else "\n     saved %r, server sent %r"
+                                 % (saved_bytes, csv_bytes)))
+        except Exception as exc:                                   # noqa: BLE001
+            results.append((False, label,
+                            "\n     raised %s: %s" % (type(exc).__name__, exc)))
+        finally:
+            globals()["_get"] = _fake_get
 
         for name, handler, extra in commands:
             label = "command runs and cannot be made to forge a line: %s" % name
