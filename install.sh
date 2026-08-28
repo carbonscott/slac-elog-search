@@ -85,12 +85,15 @@ while [ $# -gt 0 ]; do
 done
 
 # --- tree parity ------------------------------------------------------------
-tree_diff() { diff -r "$CLAUDE_SRC" "$OPENCODE_SRC"; }
+# __pycache__ is excluded everywhere below: it is generated, it is not part of
+# the skill, and comparing it would let bytecode drift masquerade as source drift.
+tree_diff() { diff -r -x '__pycache__' "$CLAUDE_SRC" "$OPENCODE_SRC"; }
 
 if [ "${SYNC:-0}" = "1" ]; then
   mkdir -p "$(dirname "$OPENCODE_SRC")"
   rm -rf "$OPENCODE_SRC"
   cp -R "$CLAUDE_SRC" "$OPENCODE_SRC"
+  find "$OPENCODE_SRC" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
   echo "synced claude/skills/$SKILL_NAME -> opencode/skills/$SKILL_NAME"
   exit 0
 fi
@@ -192,7 +195,9 @@ if [ "$UNINSTALL" -eq 1 ]; then
 fi
 
 # --- sanity: is the source actually here and intact? ------------------------
-for f in "$SRC/SKILL.md" "$SRC/scripts/elogsearch.py" "$SRC/reference/elog-api-notes.md"; do
+for f in "$SRC/SKILL.md" "$SRC/scripts/elogsearch.py" \
+         "$SRC/reference/elog-api-notes.md" \
+         "$SRC/reference/explgbk-get-routes.txt"; do
   [ -f "$f" ] || { echo "install.sh: missing $f — run this from the clone" >&2; exit 1; }
 done
 chmod +x "$SRC/scripts/elogsearch.py" 2>/dev/null || true
@@ -220,6 +225,7 @@ if [ ! -e "$DEST" ] && [ ! -L "$DEST" ]; then
     symlink) ln -s "$SRC" "$DEST"; echo "deployed $DEST -> $SRC" ;;
     copy)
       cp -R "$SRC" "$DEST"
+      find "$DEST" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
       # A copy into a shared tree is useless if the group cannot read it, which
       # is what an inherited umask of 027 produces. Group ownership comes from
       # the setgid parent on most of these trees; the shared opencode tree is

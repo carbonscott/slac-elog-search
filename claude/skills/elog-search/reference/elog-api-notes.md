@@ -28,8 +28,9 @@ ends, which no user can reproduce.
 
 The `ws-jwt` ingress validates tokens itself, before the application is reached. It does
 trust a Dex token minted by `s3df login`: confirmed on 2026-08-14, where `--auth jwt`
-authenticated as the same account and returned the same 2240 readable experiments as the
-Kerberos path through `ws-kerb`.
+authenticated as the same account and returned the same readable-experiment count as the
+Kerberos path through `ws-kerb` — 2240 on that date, 2245 when re-measured on 2026-08-28.
+The count moves; what matters is that the two mechanisms agree.
 
 ## Kerberos: still working, deliberately undocumented
 
@@ -72,17 +73,88 @@ Consequence worth knowing: the authorization behaviour is identical whichever
 authenticated prefix you use, so moving from Kerberos to JWT changes header construction
 and nothing else.
 
-## Reading routes used by this skill
+## The route model
 
-| Route | Auth | Returns |
-|---|---|---|
-| `ws/experiments` | read | every experiment **the caller may read** — the authorization boundary, made visible |
-| `ws/get_cached_experiment_names` | none | all experiment names |
-| `ws/experiment_names_updated_within?offset_secs=N` | none | names whose last run started within N seconds |
-| `<exp>/ws/search_elog` | read on that experiment | matching entries, whole documents |
+The skill calls 87 routes, and the enumeration is not here: it lives in the script's
+vendored `ROUTE_INVENTORY` (printable with `elogsearch.py routes`) and in
+`reference/explgbk-get-routes.txt`. What follows is the model those lists implement.
 
-`ws/api_endpoints` (authenticated) returns every route with its docstring — the cheapest
-way to re-derive the API surface.
+**The include criterion is "does not mutate eLog state", never "is an HTTP GET."**
+explgbk answers GET on routes that end and start runs, close shifts, cross-post entries,
+subscribe and unsubscribe people from email, toggle collaborator roles, kill and delete
+analysis jobs, and force experiment-cache rebuilds. A skill that allowed every GET could do
+all of that to the production logbook, live, during beam time.
+
+So every GET-accepting route is classified into exactly one of three classes. In
+explgbk@e5484aa there are **117** GET rules: **87 readonly**, **26 mutating**, **4 denied**.
+
+Those 117 are the rules of the **web-service blueprint** (`services/explgbk.py`,
+`@explgbk_blueprint.route`), which is the whole of the JSON API and the only thing this
+skill calls. The application registers a second blueprint in `start.py`: `pages.py`'s
+`pages_api`, 15 more GET rules that render HTML for the browser UI (`/`, `/status`,
+`/lgbk/ops`, `/lgbk/logout`, `/lgbk/<exp>/<tabname>` and so on). They are deliberately
+absent from the inventory, and `_get()` refuses them as unknown routes rather than
+classified ones, so nothing can reach them by accident.
+
+Worth knowing about two of them if you ever do extend the skill that way. `pages.py`
+contains **no write of any kind** — no Mongo call, no Kafka publish, no outbound POST — so
+none of the 15 mutates. But `/lgbk/logout` is a GET that hands back a 302 to
+`vouch.slac.stanford.edu/logout`, which ends the caller's SSO session if the client follows
+it; it belongs with `ext_preview` as a route to refuse rather than classify read-only. This
+skill does not follow redirects, so it could not complete that sequence even if the route
+were reachable.
+
+| Denied route | Why |
+|---|---|
+| `<exp>/ws/generate_arp_token` | mints a bearer credential |
+| `<exp>/ws/ext_preview/<path:path>` | `302`s to an external host, setting a cookie that holds an MD5 of the experiment name plus a server-side secret; the same bytes come from `attachment?prefer_preview=true` |
+| `ws/lookup_experiment_in_urawi` | reaches URAWI, an external system, not the logbook |
+| `ws/empty` | returns `{}` — a convenience for the web UI's JavaScript with nothing to read |
+
+**Enforcement is one function.** Every HTTP call the script can make goes through `_get()`,
+which looks up the route's class *before* it builds a URL or opens a socket. That is why
+`selftest` can prove each mutating and denied refusal offline, with no credential and no
+request to the server.
+
+**URL shape** is `BASE` + `/` + prefix + `/lgbk` + the route rule exactly as flask declares
+it, so the doubled `lgbk` above is the rule's own first segment:
+
+```
+https://pswww.slac.stanford.edu/ws-jwt/lgbk  +  /lgbk/<experiment_name>/ws/info
+```
+
+Path parameters are substituted and URL-quoted at that point. A rule left with an
+unsubstituted `<...>` raises — it is never sent as a literal.
+
+**One refusal is finer-grained than a route.** `/lgbk/ws/experiments` is read-only and is
+the authorization boundary itself, so it has to stay callable. But its `legacy_cutoff` query
+parameter reaches `cat.set_legacy_cutoff()` on the module-level categorizer singleton
+(`services/explgbk.py:274-347`), rebinding how *that worker process* buckets the experiment
+list for every later request from anybody. Nothing is persisted and a worker restart clears
+it, so the route is allowed and the parameter is refused.
+
+**Why the pin exists.** `reference/explgbk-get-routes.txt` is a checked-in copy of upstream's
+GET route list, and `selftest` fails when the script's vendored inventory disagrees with it.
+A deny-list model has exactly one weakness — a route nobody classified is a route nobody
+refused — so a future explgbk release adding a 27th mutating GET would otherwise land inside
+the permitted set in silence. The pin converts that into a failing test.
+
+**`ws/api_endpoints` is a docstring filter, not an inventory.** It returned 96 endpoints, 66
+of them GET-accepting, against the 117 web-service GET rules in the source; every one of the 51 absent rules
+maps to a view function with no `__doc__`. Use it to read a route's documentation, never to
+learn what exists.
+
+### Notable routes and their traps
+
+Not the whole 87 — the ones whose behaviour surprises a reader.
+
+| Route | Trap |
+|---|---|
+| `<exp>/ws/elog` | returns the whole logbook. No server-side limit, no pagination |
+| `<exp>/ws/attachment` | takes `entry_id` **and** `attachment_id`; a missing preview is answered with a generic icon that is an ordinary `image/png` carrying no marker, so it cannot be told from a real one after the fact — check `preview_url` on the record first |
+| `<exp>/ws/workflow/<job_id>/<path:action>` | proxies only `job_statuses`, `job_details`, `job_log_file` (`405` otherwise); its status is the LOGBOOK's, not the job daemon's — the body can be a 404 page under a 200 — and it `500`s when the job's `def.location` is absent from that experiment's `dm_locations` |
+| `ws/global_roles` | gated on `manage_groups`; ordinary readers get `403` |
+| `ws/search_experiment_info` | a MongoDB `$text` search over whole stemmed words, so `crystallography` matches and the instrument prefix `cxi` does not |
 
 ## search_elog semantics
 
@@ -162,7 +234,7 @@ hold the operational content that spans experiments and are often what someone i
 actually looking for, and **this skill can search them**: name them with `--experiments`,
 in either spelling.
 
-Fourteen of the 2240 have a `name` that differs from their `_id` by containing a space
+Fourteen have a `name` that differs from their `_id` by containing a space
 (`Sample Delivery System` versus `Sample_Delivery_System`), and the spaced form in a URL
 path returns HTTP 500 — so a client that builds paths from `name` rather than `_id`
 silently loses exactly these fourteen, which are the most valuable ones.
