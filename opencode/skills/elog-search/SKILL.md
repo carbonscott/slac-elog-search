@@ -602,9 +602,12 @@ The logbook is production and live during beam time, so these are limits, not pr
   genuinely means to search wider can raise it for one invocation, but the default is a
   measured limit and must not be raised in code. Do not sweep all ~2,245 experiments: a
   full sweep is a load event, not a query.
-* **`ENTRIES_CAP = 200` caps `entries` client-side.** The whole-logbook route has no
-  server-side limit, so the skill applies its own: `--limit` defaults to 20 and is clamped
-  to 200 however high you set it.
+* **`ENTRIES_CAP = 200` caps what `entries` PRINTS, not what it fetches.** Unlike the two
+  above, this is not a load limit. The whole-logbook route has no server-side limit and no
+  parameter that would give it one, so `entries` fetches and sorts the entire logbook every
+  time and then shows the newest few: `--limit` defaults to 20 and is clamped to 200 however
+  high you set it. Raising `--limit` costs nothing extra on the wire; the cost is in the call
+  itself, so on a large logbook prefer `search` over `entries`.
 
 ## Search syntax
 

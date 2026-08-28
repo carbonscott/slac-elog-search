@@ -1854,10 +1854,13 @@ R_ELOG_TAGS = "/lgbk/<experiment_name>/ws/get_elog_tags"
 R_INSTRUMENT_ELOGS = "/lgbk/<experiment_name>/ws/get_instrument_elogs"
 R_ATTACHMENT = "/lgbk/<experiment_name>/ws/attachment"
 
-# The whole-logbook route has NO server-side limit, so the cap lives here.  This
-# is the same failure the empty-query refusal already closed for search: a route
-# that will happily return an entire experiment's logbook is a load event unless
-# the client bounds it.
+# The whole-logbook route has NO server-side limit and takes no parameter that
+# would give it one, so this cap bounds the PRINTOUT, not the request: cmd_entries
+# still fetches and sorts the entire logbook and only then slices to `limit`.
+# Nothing here reduces the bytes on the wire.  It is a readability bound and a
+# guard against dumping thousands of entries at a caller, and it is named here
+# rather than in the handler so the number is quotable -- but do not read it as a
+# load limit the way CONCURRENCY and DEFAULT_SCOPE_CAP are.
 ENTRIES_CAP = 200
 
 
@@ -1876,7 +1879,8 @@ def cmd_entries(args):
     limit = min(args.limit, ENTRIES_CAP)
     print("experiment : %s" % args.experiment)
     print("identity   : %s (%s)" % (cred["identity"], cred["prefix"]))
-    print("route      : %s  (whole logbook; the server applies no limit)" % R_ELOG)
+    print("route      : %s  (whole logbook is fetched; the server applies no "
+          "limit, and the cap below trims the printout, not the transfer)" % R_ELOG)
     print("returned   : %d entries; %d suppressed as deleted; showing newest %d"
           % (returned, dropped, min(limit, len(docs))))
     print()
@@ -3777,6 +3781,18 @@ def _selftest_logic():
     # someone reading prints one at a time. So scan the source for the SHAPE
     # instead: a print() that interpolates a value pulled out of a server
     # document must route it through _one_line, _no_control or _print_json.
+    # ENTRIES_CAP bounds the printout, never the request: a comment that says
+    # otherwise is a false claim about load, which is exactly the kind of claim
+    # this file is careful about elsewhere.
+    _own_source = open(os.path.abspath(__file__)).read()
+    _cap_comment = _own_source.split("ENTRIES_CAP = 200")[0].rsplit("\n\n", 1)[-1]
+    _cap_comment = _cap_comment.lower()
+    case("printout" in _cap_comment and "not the request" in _cap_comment,
+         "the ENTRIES_CAP comment says it caps the printout, not the request")
+    case("min(args.limit, ENTRIES_CAP)" in _inspect.getsource(cmd_entries)
+         and ENTRIES_CAP == 200,
+         "entries still clamps --limit to ENTRIES_CAP (200)")
+
     label = "no print() renders server data without a sanitiser"
     offenders = []
     try:
