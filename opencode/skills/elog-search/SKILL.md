@@ -148,6 +148,44 @@ nearly as much context as matches.
 That is honest output, not a bug — the counts say so plainly, and `--hide-context` drops
 them if you only want hits.
 
+## Two things called "run"
+
+"Run 17" is ambiguous in LCLS conversation, and the two meanings are not close:
+
+- an **experiment run** — the sequential acquisition number *within* one experiment,
+  1, 2, 3…, which is what the run table and every per-run number below refer to;
+- an **LCLS run** — a facility operational period spanning months and many
+  experiments, encoded in the experiment id itself.
+
+When a question could mean either, ask rather than guess. *"What photon energy did we
+run mfxlv4920 at for run 42?"* is an experiment run. *"Which experiments ran in run 17?"*
+is a facility run, and it is not a text search at all — it is a filter over experiment ids.
+
+**The encoding:** an LCLS run number is the **last two digits of the experiment id**.
+
+| experiment id | LCLS run |
+| --- | --- |
+| `mfxc00117` | 17 |
+| `amo01616` | 16 |
+| `mfx100895324` | 24 |
+
+Checked on 2026-08-28 against all 1,964 experiments in the elog database: trailing digits
+fall in 09–26, which is the plausible LCLS run range, for every experiment except the two
+cases below. CXI, XPP, MFX, XCS, MEC, SXR, AMO and TMO all obey it.
+
+**Two exceptions, both real and both easy to detect:**
+
+- **MeV-UED does not follow the rule.** `ueddaq02`, `uedcom103`, `ued1013843` and 40 others
+  are a different facility with its own numbering, and their trailing digits are not an
+  LCLS run. The split is clean: all 43 UED records fall outside 09–26 and *no* UED record
+  falls inside it, so the `UED` instrument value is a reliable tell.
+- **One record is not an experiment at all.** `Installation`, filed under AMO, has no run
+  number of any kind.
+
+**`prop-` prefixed ids** (e.g. `prop-100833925`) are proposed but unscheduled experiments;
+the last two digits still give the LCLS run. This rule is inherited from the `elog-copilot`
+skill rather than confirmed here — the 2026-08-28 snapshot contained no `prop-` records.
+
 ## What it filters, and what it tells you it filtered
 
 Read `entries shown as matches` precisely: it means **returned by the server, not deleted,
