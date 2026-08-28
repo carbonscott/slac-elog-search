@@ -1502,9 +1502,12 @@ def cmd_search(args):
         print("  Give the prefix something to match, e.g. x:[Jj]et.*clog",
               file=sys.stderr)
         return 2
-    if args.limit < 0:
-        print("REFUSING: --limit %d is negative.  As a slice bound that silently "
-              "drops entries off the END of the results." % args.limit, file=sys.stderr)
+    # main() refuses this for every subcommand now; kept here so calling
+    # cmd_search directly (as selftest does) still refuses rather than slicing.
+    if args.limit < 1:
+        print("REFUSING: --limit %d is not a bound.  As a slice bound a "
+              "non-positive limit widens the output instead of narrowing it."
+              % args.limit, file=sys.stderr)
         return 2
     if query.startswith("x:"):
         try:
@@ -3465,6 +3468,36 @@ def _selftest_logic():
          "run numbers sort numerically, with string names last",
          "" if ordered == ["2", "9", "10", "abc"] else "\n     got %r" % ordered)
 
+    # --limit is a bound, and a non-positive one is a WIDER answer, not a
+    # narrower one.  Checked once in main() so every subcommand agrees.
+    class _Limited(object):
+        pass
+
+    for bad in (0, -5):
+        probe = _Limited()
+        probe.limit = bad
+        try:
+            refuse_bad_limit(probe)
+            case(False, "a --limit of %d is refused" % bad, "\n     it was accepted")
+        except ValueError:
+            case(True, "a --limit of %d is refused" % bad)
+    probe = _Limited()
+    probe.limit = 1
+    try:
+        refuse_bad_limit(probe)
+        case(True, "a --limit of 1 is still accepted")
+    except ValueError as exc:
+        case(False, "a --limit of 1 is still accepted", "\n     %s" % exc)
+    probe = _Limited()
+    try:
+        refuse_bad_limit(probe)
+        case(True, "a subcommand with no --limit is unaffected")
+    except ValueError as exc:
+        case(False, "a subcommand with no --limit is unaffected", "\n     %s" % exc)
+    import inspect as _inspect
+    case("refuse_bad_limit(args)" in _inspect.getsource(main),
+         "the limit check is wired into main(), not just defined")
+
     # key=value parsing for --path and --param.
     case(_pair("a=b", "--param") == ("a", "b"), "key=value splits on the first =")
     case(_pair("a=b=c", "--param") == ("a", "b=c"), "only the first = separates")
@@ -4278,6 +4311,29 @@ def build_parser():
     return parser
 
 
+def refuse_bad_limit(args):
+    """--limit is a BOUND.  A non-positive one is not a smaller bound, it is a
+    bigger answer.
+
+    Every list-printing command tails with `ordered[-args.limit:]`, so `--limit 0`
+    is `ordered[0:]` -- every row -- and `--limit -5` is `ordered[5:]` --
+    everything but the five oldest.  `_print_json` slices the other way, so
+    `--limit -5` drops the last five and announces "the first -5 of N".  On
+    commands whose whole purpose is bounding a load event against the production
+    logbook, the flag that says "less" produced more.
+
+    Checked once, in main(), so every subcommand agrees rather than each one
+    remembering.
+    """
+    limit = getattr(args, "limit", None)
+    if limit is not None and limit < 1:
+        raise ValueError(
+            "--limit %d is not a bound.  As a slice bound a non-positive limit "
+            "WIDENS the output instead of narrowing it: 0 prints everything and "
+            "a negative one prints everything but the oldest few.  Give a "
+            "positive number." % limit)
+
+
 def _transport_error_types():
     """requests' transport exceptions, as a tuple `except` can take.
 
@@ -4295,6 +4351,7 @@ def _transport_error_types():
 def main():
     args = build_parser().parse_args()
     try:
+        refuse_bad_limit(args)
         return args.func(args)
     except CredentialError as exc:
         print("CREDENTIAL BLOCKED: %s" % exc, file=sys.stderr)

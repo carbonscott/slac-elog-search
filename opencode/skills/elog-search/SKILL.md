@@ -28,9 +28,10 @@ this covers more than it looks: the route policy (a mutating or denied route, a 
 parameter), an argument the skill will not accept (empty query, runaway or invalid regex,
 unreadable date, unknown instrument, over the cap, an oversized attachment), **and any
 non-200 reached through the named subcommands**, because those raise rather than return and
-the message is printed as `REFUSING:` · `3` `CREDENTIAL BLOCKED`. Two asymmetries worth
-knowing: `scope` exits `0` when it selects nothing where `search` exits `1`, and a negative
-`--limit` is refused only by `search` — elsewhere it silently selects nothing.
+the message is printed as `REFUSING:` · `3` `CREDENTIAL BLOCKED`. One asymmetry worth
+knowing: `scope` exits `0` when it selects nothing where `search` exits `1`. A non-positive
+`--limit` is refused by every subcommand — as a slice bound it would widen the output rather
+than narrow it.
 
 `reference/elog-api-notes.md`, next to this file, documents the underlying API — endpoint
 prefixes, the entry document shape, and the server-side search semantics this skill has to
