@@ -325,6 +325,7 @@ elogsearch.py attachment EXPERIMENT ENTRY_ID ATTACHMENT_ID [--out PATH [--force]
 elogsearch.py runs      EXPERIMENT [--run N | --current] [--params] [--sample S] [--json]
                         [--limit N]                    # --limit defaults to 40 here
 elogsearch.py runtable  EXPERIMENT [--table NAME] [--sources] [--csv [--out PATH [--force]]] [--sample S]
+                        (--out belongs to --csv; without it runtable refuses rather than dropping the path)
 elogsearch.py files     EXPERIMENT [--run N | --counts] [--sample S] [--limit N]
 elogsearch.py samples   EXPERIMENT [--sample NAME | --current]
 elogsearch.py workflows EXPERIMENT [--definitions | --triggers | --job ID --action ACTION]

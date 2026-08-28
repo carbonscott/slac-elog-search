@@ -2325,6 +2325,19 @@ def cmd_runs(args):
 
 def cmd_runtable(args):
     """Run tables: the per-run numbers a text search will not find."""
+    if args.out and not args.csv:
+        # The mirror of the --csv-without---table refusal below.  Only the CSV
+        # path writes a file, so `runtable EXP --table T --out /tmp/x.csv` used
+        # to print JSON to stdout and drop the path without a word.  The other
+        # modes have nothing worth saving under that name: they print a
+        # formatted, sanitised, --chars-truncated view, not the server's bytes,
+        # so writing THAT to a named .csv would be a worse surprise than saying
+        # so.  SKILL.md already documents the shape as `--csv [--out PATH]`.
+        raise ValueError(
+            "--out saves the CSV export and nothing else asks for a file: add "
+            "--csv (with --table) to export, or drop --out.  Without --csv this "
+            "command prints a formatted view, not the server's own bytes, and "
+            "saving that under the name you gave would misrepresent it.")
     session, cred = _session_for(args)
     exp = {"experiment_name": args.experiment}
     if args.sources:
@@ -3689,6 +3702,38 @@ def _selftest_logic():
     case("refuse_bad_limit(args)" in _inspect.getsource(main),
          "the limit check is wired into main(), not just defined")
 
+    # runtable --out is only meaningful on the --csv path; outside it the flag
+    # used to be read and dropped in silence.
+    class _RunTableArgs(object):
+        experiment = "x"
+        table = None
+        sources = False
+        csv = False
+        sample = None
+        out = None
+        force = False
+        limit = 20
+        chars = 6000
+        timeout = 300
+        auth = None
+
+    for label, table, sources in (("--table", "T", False), ("--sources", None, True),
+                                  ("bare", None, False)):
+        probe = _RunTableArgs()
+        probe.table, probe.sources = table, sources
+        probe.out = "/tmp/elogsearch-selftest-never-written.csv"
+        try:
+            cmd_runtable(probe)
+            case(False, "runtable --out without --csv is refused (%s)" % label,
+                 "\n     the flag was accepted and would be dropped")
+        except ValueError as exc:
+            case("--csv" in str(exc),
+                 "runtable --out without --csv is refused (%s)" % label,
+                 "" if "--csv" in str(exc) else "\n     %s" % exc)
+    case("--out saves the CSV export"
+         in _inspect.getsource(cmd_runtable),
+         "the refusal names --csv, so the caller knows which flag to add")
+
     # --chars is the sibling flag with the same slice hazard, but 0 is
     # DOCUMENTED as "no limit" there, so the bound is < 0 rather than < 1.
     for bad in (-1, -5):
@@ -4579,7 +4624,9 @@ def build_parser():
     rtb_which.add_argument("--csv", action="store_true",
                            help="export the named table as CSV (needs --table)")
     rtb.add_argument("--sample", default=None, help="restrict to one sample")
-    rtb.add_argument("--out", default=None, help="save the CSV here instead of printing it")
+    rtb.add_argument("--out", default=None,
+                     help="save the CSV here instead of printing it (needs --csv; "
+                          "no other mode writes a file)")
     rtb.add_argument("--force", action="store_true",
                      help="replace the file at --out if one is already there")
     rtb.add_argument("--limit", type=int, default=20)
