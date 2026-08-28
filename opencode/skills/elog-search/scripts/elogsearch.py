@@ -1627,6 +1627,15 @@ def _resolve_rule(text):
     wanted = text.strip("/")
     hits = [rule for rule in ROUTE_CLASS
             if rule.strip("/").endswith("/" + wanted) or rule.strip("/") == wanted]
+    # Upstream registers `ws/samples` and `ws/samples/` as two rules, and the
+    # inventory keeps both because the pin holds it equal to the vendored route
+    # list.  To a person typing `get samples` they are one route: the old code
+    # called that ambiguous and printed two lines differing only by a trailing
+    # slash, which is not a choice a reader can act on.  Candidates equal after
+    # rstrip("/") collapse to one hit, and the canonical (unslashed) form wins.
+    canonical = sorted(set(rule.rstrip("/") for rule in hits))
+    if len(canonical) == 1:
+        return canonical[0] if canonical[0] in ROUTE_CLASS else hits[0]
     if len(hits) == 1:
         return hits[0]
     if not hits:
@@ -3332,6 +3341,18 @@ def _selftest_subcommands():
             # mutating route still resolves, and _get() still refuses it.
             if _resolve_rule("runs") != "/lgbk/<experiment_name>/ws/runs":
                 problems.append("'runs' does not resolve to the runs route")
+            # `ws/samples` and `ws/samples/` are two inventory entries that a
+            # reader cannot tell apart.  The shorthand must still land.
+            if _resolve_rule("samples") != "/lgbk/<experiment_name>/ws/samples":
+                problems.append("'samples' does not resolve past the trailing-slash twin")
+            if _resolve_rule("samples/") != "/lgbk/<experiment_name>/ws/samples":
+                problems.append("'samples/' does not resolve past the trailing-slash twin")
+            # Collapsing must not blur genuinely different routes.
+            try:
+                _resolve_rule("files")
+                problems.append("'files' resolved despite naming several distinct routes")
+            except ValueError:
+                pass
             mutating_rule = _resolve_rule("end_run")
             if ROUTE_CLASS.get(mutating_rule) != "mutating":
                 problems.append("'end_run' does not resolve to a mutating route")
