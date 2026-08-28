@@ -311,10 +311,10 @@ elogsearch.py entries   EXPERIMENT [--limit N] [--chars N]
 elogsearch.py thread    EXPERIMENT ENTRY_ID
 elogsearch.py tags      EXPERIMENT
 elogsearch.py logbooks  [--experiment EXPERIMENT]
-elogsearch.py attachment EXPERIMENT ENTRY_ID ATTACHMENT_ID [--out PATH] [--preview]
+elogsearch.py attachment EXPERIMENT ENTRY_ID ATTACHMENT_ID [--out PATH [--force]] [--preview]
 elogsearch.py runs      EXPERIMENT [--run N | --current] [--params] [--sample S] [--json]
                         [--limit N]                    # --limit defaults to 40 here
-elogsearch.py runtable  EXPERIMENT [--table NAME] [--sources] [--csv [--out PATH]] [--sample S]
+elogsearch.py runtable  EXPERIMENT [--table NAME] [--sources] [--csv [--out PATH [--force]]] [--sample S]
 elogsearch.py files     EXPERIMENT [--run N | --counts] [--sample S] [--limit N]
 elogsearch.py samples   EXPERIMENT [--sample NAME | --current]
 elogsearch.py workflows EXPERIMENT [--definitions | --triggers | --job ID --action ACTION]
@@ -567,7 +567,9 @@ Entry **content is never written to disk as a side effect of searching** — not
 logged, not spilled into a scratch file while a search runs. The one deliberate exception
 are `attachment --out PATH` and `runtable --csv --out PATH`: writing to a path the user
 named is the thing the user asked for, not a side effect, and neither writes anything
-without `--out`. The
+without `--out`. Neither replaces a file that is already at that path either: an existing
+`--out` is refused until you pass `--force`, and a forced write reports `overwrote` rather
+than `saved`. The
 saved file's extension comes from this skill's own type map, never from the `type` string
 the server returns, because that string is whatever the uploader's browser claimed.
 

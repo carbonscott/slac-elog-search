@@ -1982,6 +1982,24 @@ ATTACHMENT_EXTENSIONS = {
 ATTACHMENT_MAX_BYTES = 64 * 1024 * 1024
 
 
+def _refuse_overwrite(path, force):
+    """Refuse to destroy a file the user did not say to replace.
+
+    Writing to disk is the only side effect this skill has, and the branch that
+    refuses to write at all without --out calls it a deliberate act.  Truncating
+    whatever was already at that path is a deliberate act too, so it needs its
+    own word: --force.  Returns True when an existing file is being replaced, so
+    the caller can say "overwrote" rather than "saved".
+    """
+    if not os.path.exists(path):
+        return False
+    if not force:
+        raise ValueError(
+            "%s already exists and this skill will not silently replace it.  "
+            "Name another path, or pass --force." % path)
+    return True
+
+
 def _find_attachment(session, cred, experiment, entry_id, attachment_id, timeout):
     """The attachment's own record, from the entry that carries it.
 
@@ -2110,10 +2128,12 @@ def cmd_attachment(args):
     root, ext = os.path.splitext(out)
     if not ext:
         out = root + ATTACHMENT_EXTENSIONS.get(ctype, ".bin")
+    replaced = _refuse_overwrite(out, getattr(args, "force", False))
     with open(out, "wb") as handle:
         handle.write(body)
     print()
-    print("saved       : %s  (%d bytes)" % (out, len(body)))
+    print("%-11s : %s  (%d bytes)"
+          % ("overwrote" if replaced else "saved", out, len(body)))
     print("extension chosen from this skill\'s own type map, not the server\'s string.")
     return 0
 
@@ -2319,9 +2339,10 @@ def cmd_runtable(args):
             print(_no_control(response.text[:1000]))
             return 1
         if args.out:
+            replaced = _refuse_overwrite(args.out, getattr(args, "force", False))
             with open(args.out, "w") as handle:
                 handle.write(response.text)
-            print("saved      : %s" % args.out)
+            print("%-10s : %s" % ("overwrote" if replaced else "saved", args.out))
             return 0
         print(_no_control(response.text[:args.chars]))
         return 0
@@ -3608,6 +3629,27 @@ def _selftest_logic():
     case("refuse_bad_limit(args)" in _inspect.getsource(main),
          "the limit check is wired into main(), not just defined")
 
+    # The only destructive act in a read-only tool: replacing a file at --out.
+    import tempfile as _tempfile
+    handle = _tempfile.NamedTemporaryFile(delete=False)
+    handle.write(b"existing")
+    handle.close()
+    try:
+        try:
+            _refuse_overwrite(handle.name, False)
+            case(False, "an existing --out file is not silently truncated",
+                 "\n     the write was allowed")
+        except ValueError as exc:
+            case("--force" in str(exc),
+                 "an existing --out file is not silently truncated",
+                 "" if "--force" in str(exc) else "\n     %s" % exc)
+        case(_refuse_overwrite(handle.name, True) is True,
+             "--force allows the replacement and reports it as one")
+        case(_refuse_overwrite(handle.name + ".absent", False) is False,
+             "a path with no file there is written without ceremony")
+    finally:
+        os.remove(handle.name)
+
     # key=value parsing for --path and --param.
     case(_pair("a=b", "--param") == ("a", "b"), "key=value splits on the first =")
     case(_pair("a=b=c", "--param") == ("a", "b=c"), "only the first = separates")
@@ -4362,6 +4404,8 @@ def build_parser():
                     help="save here.  Without it nothing is written: putting an "
                          "attachment on disk is a deliberate act, never a side "
                          "effect of reading")
+    at.add_argument("--force", action="store_true",
+                    help="replace the file at --out if one is already there")
     at.add_argument("--preview", action="store_true",
                     help="ask for the preview rendition instead of the original")
     at.add_argument("--timeout", type=int, default=300)
@@ -4400,6 +4444,8 @@ def build_parser():
                            help="export the named table as CSV (needs --table)")
     rtb.add_argument("--sample", default=None, help="restrict to one sample")
     rtb.add_argument("--out", default=None, help="save the CSV here instead of printing it")
+    rtb.add_argument("--force", action="store_true",
+                     help="replace the file at --out if one is already there")
     rtb.add_argument("--limit", type=int, default=20)
     rtb.add_argument("--chars", type=int, default=6000)
     rtb.add_argument("--timeout", type=int, default=300)
