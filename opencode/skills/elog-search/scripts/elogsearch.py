@@ -62,9 +62,23 @@ BASE = "https://pswww.slac.stanford.edu"
 #
 # The inventory is VENDORED, not discovered at run time.  A copy of the upstream
 # route list is checked in at reference/explgbk-get-routes.txt and `selftest`
-# fails when the two disagree.  That pin is the whole mitigation for the one
-# weakness of a deny-list model: a future explgbk release adding a 27th mutating
-# GET would otherwise fall inside the permitted set in silence.
+# fails when the two disagree.  Be precise about what that pin buys: BOTH files
+# live in this repo and are edited together, so an upstream release touches
+# neither and the pin stays green straight through it.  What it catches is a
+# local edit -- a route added to ROUTE_INVENTORY without re-vendoring the
+# reference file, or a re-vendoring whose new routes nobody classified.
+#
+# The upstream event -- a future explgbk release adding a 27th mutating GET --
+# is covered by something stronger: the `klass is None` branch in _get().  A
+# rule absent from the inventory is refused outright, so a newly-added upstream
+# route is DENIED by default rather than falling inside the permitted set in
+# silence.  Re-vendoring on an explgbk upgrade is a manual step; no test here
+# will remind you to do it.
+#
+# What neither mechanism can see: a route already classified readonly whose
+# upstream handler starts mutating.  Both vendored files stay untouched and the
+# classification is quietly wrong.  Re-read the handlers, not just the rules,
+# when bumping UPSTREAM_COMMIT.
 
 ROUTE_INVENTORY = (
     # DENIED -- read-only by the letter of the rule, refused anyway.
@@ -3211,10 +3225,11 @@ def _selftest_policy():
     except Exception as exc:                                       # noqa: BLE001
         results.append((False, label, "\n     %s: %s" % (type(exc).__name__, exc)))
 
-    # The pin.  A deny-list model is permissive by construction: a future explgbk
-    # release adding a 27th mutating GET would land inside the allowed set in
-    # silence.  This is the tripwire, and it is the reason the upstream list is
-    # vendored under reference/ instead of being trusted from memory.
+    # The pin.  It compares two files that both live in this repo, so it does
+    # NOT see an upstream release: what it catches is an edit to ROUTE_INVENTORY
+    # that forgets the reference file, or a re-vendoring that forgets to
+    # classify.  A route explgbk adds upstream is refused by _get()'s
+    # `klass is None` branch instead -- absent from the inventory means denied.
     label = "inventory pin: vendored routes == reference/explgbk-get-routes.txt"
     try:
         reference = _read_reference_routes()

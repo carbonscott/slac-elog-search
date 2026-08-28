@@ -133,11 +133,17 @@ parameter reaches `cat.set_legacy_cutoff()` on the module-level categorizer sing
 list for every later request from anybody. Nothing is persisted and a worker restart clears
 it, so the route is allowed and the parameter is refused.
 
-**Why the pin exists.** `reference/explgbk-get-routes.txt` is a checked-in copy of upstream's
-GET route list, and `selftest` fails when the script's vendored inventory disagrees with it.
+**Why the pin exists — and what it does not do.** `reference/explgbk-get-routes.txt` is a
+checked-in copy of upstream's GET route list, and `selftest` fails when the script's vendored
+inventory disagrees with it. Both files are in this repo and are edited together, so an
+explgbk release changes neither and the pin stays green through it: the pin catches a local
+edit — a route classified without re-vendoring, or re-vendored without being classified.
+
 A deny-list model has exactly one weakness — a route nobody classified is a route nobody
-refused — so a future explgbk release adding a 27th mutating GET would otherwise land inside
-the permitted set in silence. The pin converts that into a failing test.
+refused — and that is closed in the choke point, not by the pin: `_get()` refuses any rule
+absent from the inventory, so a future explgbk release adding a 27th mutating GET is denied
+by default. Re-vendoring on an upgrade is a manual step. Neither mechanism sees a route that
+keeps its rule while its handler starts mutating.
 
 **`ws/api_endpoints` is a docstring filter, not an inventory.** It returned 96 endpoints, 66
 of them GET-accepting, against the 117 web-service GET rules in the source; every one of the 51 absent rules

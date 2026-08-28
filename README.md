@@ -111,9 +111,14 @@ alone a socket opened.
 
 `elogsearch.py routes` prints that inventory. `elogsearch.py selftest` proves
 the refusals with no credential and no network, and fails if the vendored copy
-of upstream's route list has drifted from the classification — the tripwire for
-the one weakness of a deny-list model, a future release adding a 27th mutating
-GET that would otherwise land inside the permitted set in silence.
+of upstream's route list has drifted from the classification — a check on this
+repo's own two files, which catches a classification edit that forgets to
+re-vendor, not an upstream release. The one weakness of a deny-list model — a
+future release adding a 27th mutating GET — is covered by the choke point
+itself: a route absent from the inventory is refused, so anything new upstream
+is denied until somebody classifies it. Re-vendoring after an explgbk upgrade
+is a manual step, and a route whose handler turns mutating while keeping its
+rule is invisible to both.
 
 [reference/elog-api-notes.md](claude/skills/elog-search/reference/elog-api-notes.md)
 has the endpoint prefixes, the entry document shape, the server-side search

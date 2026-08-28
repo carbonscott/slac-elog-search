@@ -1,9 +1,11 @@
 # Every GET-accepting route of slaclab/explgbk, copied from
 # services/explgbk.py at commit e5484aa.  One line per route rule:
 #     <comma-separated methods><TAB><rule>
-# The selftest pins the script's vendored inventory against this file, so a
-# future explgbk release that adds a route fails the test instead of
-# silently falling inside the deny-list model's permitted set.
+# The selftest pins the script's vendored inventory against this file.  Both
+# are in this repo, so the pin catches a classification edit that forgot to
+# re-vendor -- NOT an upstream release, which changes neither file.  A route
+# explgbk adds upstream is refused by _get() for being absent from the
+# inventory; re-vendoring after an upgrade is a manual step.
 GET,POST	/lgbk/<experiment_name>/migrate_attachments
 GET	/lgbk/<experiment_name>/ws/<run_num>/current_files_for_live_mode
 GET	/lgbk/<experiment_name>/ws/<run_num>/current_files_for_live_mode_at_location
