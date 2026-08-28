@@ -1055,6 +1055,11 @@ _QUOTED = re.compile(r'"([^"]*)"')
 REGEX_CANARY_RUN = 48
 REGEX_BUDGET_SECONDS = 0.25
 
+# One representative character per common escape, so a repetition expressed as a
+# class -- `(\d+)+$`, `(\s+)+$`, `(\w+)+!` -- is probed with input it can
+# actually match.  Anything not listed contributes nothing rather than a guess.
+ESCAPE_SAMPLES = {"d": "5", "w": "w", "s": " ", "D": "D", "W": "!", "S": "S"}
+
 
 def _regex_canaries(pattern):
     """Adversarial inputs built from the pattern's OWN literal alphabet.
@@ -1066,11 +1071,30 @@ def _regex_canaries(pattern):
     backtracking regex diverge -- a long run that ALMOST matches and then fails.
     """
     letters = []
-    for char in pattern:
-        if char.isalnum() and char not in letters:
+
+    def _add(char):
+        if char and char not in letters:
             letters.append(char)
-        if len(letters) >= 4:
-            break
+
+    index = 0
+    while index < len(pattern) and len(letters) < 4:
+        char = pattern[index]
+        if char == "\\" and index + 1 < len(pattern):
+            # An escape is not its own literal.  `(\d+)+$` used to be probed with
+            # a run of the letter "d" -- taken from the spelling of the class,
+            # not from anything the pattern can match -- so the probe cleared it
+            # in microseconds and it backtracked for real on the first
+            # run-number-heavy entry, in a worker thread SIGALRM cannot reach.
+            _add(ESCAPE_SAMPLES.get(pattern[index + 1]))
+            index += 2
+            continue
+        if char.isalnum():
+            _add(char)
+        index += 1
+    # And unconditionally: a quantifier over a character class need not spell any
+    # of its members out at all, so always probe a digit run and a space run.
+    for char in ("5", " "):
+        _add(char)
     canaries = []
     for char in letters or ["a"]:
         tail = "!" if "!" not in pattern else "\x00"
@@ -3022,7 +3046,11 @@ def _selftest_policy():
     # against hundreds of kilobytes, holding sessions open on the production
     # logbook.  Measured before the probe existed: (a+)+$ against 41 characters
     # did not finish in 120 seconds.
-    runaway = ["(a+)+$", "(x+x+)+y", r"^(\w+\s?)*$"]
+    # The last three are the class-quantifier form: their repetition is spelled
+    # as an escape, so the canary alphabet has to expand `\d`, `\s` and `\w`
+    # or the probe is run with input the pattern cannot match and clears it.
+    runaway = ["(a+)+$", "(x+x+)+y", r"^(\w+\s?)*$",
+               r"(\d+)+$", r"(\s+)+$", r"(\w+)+!"]
     for pattern in runaway:
         label = "runaway regex refused before any HTTP: %s" % pattern
         try:
