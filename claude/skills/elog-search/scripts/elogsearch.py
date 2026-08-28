@@ -1391,6 +1391,19 @@ def _no_control(value):
     return _CONTROL.sub("", "" if value is None else str(value))
 
 
+def _clip(text, chars):
+    """Bound printed text at --chars, where 0 means no limit.
+
+    SKILL.md and `--chars` help both document 0 as "no limit", and
+    refuse_bad_chars bounds at `< 0` rather than `< 1` on exactly that grounds.
+    A bare `text[:chars]` slice breaks that promise: `--chars 0` prints nothing
+    at all, which is indistinguishable from a job that logged nothing.  Every
+    raw-text and JSON print site goes through here so the five copies of this
+    expression cannot drift apart again.
+    """
+    return text[:chars] if chars else text
+
+
 def print_entry(experiment, doc, kind, chars, query=""):
     if kind == "context":
         tag = "  [thread context -- did not match the query]"
@@ -1836,7 +1849,7 @@ def cmd_get(args):
     try:
         payload = _unwrap(response)
     except ValueError:
-        print(_no_control(response.text[:args.chars]))
+        print(_no_control(_clip(response.text, args.chars)))
         return 0
     if args.suppress_deleted:
         payload, dropped = _suppress_deleted(payload)
@@ -1847,7 +1860,7 @@ def cmd_get(args):
         text = json.dumps(payload[:args.limit], indent=2, default=str)
         print("(showing the first %d of %d; raise with --limit)"
               % (args.limit, len(payload)))
-    print(_no_control(text[:args.chars] if args.chars else text))
+    print(_no_control(_clip(text, args.chars)))
     return 0
 
 
@@ -1968,7 +1981,7 @@ def cmd_logbooks(args):
         print("experiment : %s" % args.experiment)
         print("route      : %s" % R_INSTRUMENT_ELOGS)
         print()
-        print(json.dumps(elogs, indent=2, default=str)[:args.chars])
+        print(_clip(json.dumps(elogs, indent=2, default=str), args.chars))
         return 0
     records = readable_experiments(session, cred, refresh=args.refresh)
     standing = [r for r in records if r.get("key") and r["name"] != r["key"]]
@@ -2270,7 +2283,7 @@ def _print_json(payload, chars, limit=None):
         print("(showing the first %d of %d; raise with --limit)" % (limit, len(payload)))
         payload = payload[:limit]
     text = json.dumps(payload, indent=2, default=str)
-    print(text[:chars] if chars else text)
+    print(_clip(text, chars))
 
 
 def cmd_runs(args):
@@ -2384,7 +2397,7 @@ def cmd_runtable(args):
                 handle.write(response.text)
             print("%-10s : %s" % ("overwrote" if replaced else "saved", args.out))
             return 0
-        print(_no_control(response.text[:args.chars]))
+        print(_no_control(_clip(response.text, args.chars)))
         return 0
     params = {"tableName": args.table}
     if args.sample:
@@ -2496,7 +2509,7 @@ def cmd_workflows(args):
         if response.status_code != 200:
             print(_no_control(response.text[:1000]))
             return 1
-        print(_no_control(response.text[:args.chars]))
+        print(_no_control(_clip(response.text, args.chars)))
         return 0
     docs = _api(session, cred, R_WF_JOBS, path_params=exp, timeout=args.timeout)
     print("experiment   : %s" % args.experiment)
@@ -3665,6 +3678,16 @@ def _selftest_logic():
     kept, dropped = _suppress_deleted("not a list")
     case(kept == "not a list" and dropped == 0,
          "a non-list payload passes through unchanged")
+
+    # --chars 0 is documented as "no limit", and refuse_bad_chars permits 0 on
+    # exactly that grounds.  Four raw-text print sites used to slice [:0] and
+    # print nothing; they all go through _clip now.
+    for chars, want, why in ((0, "abcdef", "0 means no limit"),
+                             (None, "abcdef", "no --chars at all means no limit"),
+                             (3, "abc", "a positive width bounds the head")):
+        got = _clip("abcdef", chars)
+        case(got == want, "_clip: %s" % why,
+             "" if got == want else "\n     got %r, wanted %r" % (got, want))
 
     # Run numbers: ints for most instruments, strings for cryo.
     ordered = sorted(["10", "9", "abc", "2"], key=_run_sort_key)
