@@ -22,13 +22,19 @@ and returns rows: `search "clog" --instrument cxi --days 180` gave 11 entries ac
 experiments on 2026-08-13.
 
 **Exit codes**: `0` success, including a legitimate zero hits · `1` the thing asked for was
-not there — `search` selected no experiments, `get` got a non-200, an entry had no such
-attachment, or `--preview` was asked for on an attachment that has none · `2` refused, and
-this covers more than it looks: the route policy (a mutating or denied route, a refused
-parameter), an argument the skill will not accept (empty query, runaway or invalid regex,
-unreadable date, unknown instrument, over the cap, an oversized attachment), **and any
-non-200 reached through the named subcommands**, because those raise rather than return and
-the message is printed as `REFUSING:` · `3` `CREDENTIAL BLOCKED`. One asymmetry worth
+not there, or the server said no on one of the four paths that print the status and return
+rather than raising — `search` selected no experiments; `get`, `runtable --csv`,
+`workflows --job` and `attachment` each got a non-200 and printed the body; an entry had no
+such attachment; `--preview` was asked for on an attachment that has none · `2` **refused by
+this skill**: the route policy (a mutating or denied route, a refused parameter, a workflow
+action the logbook does not proxy), an argument it will not accept (empty query, runaway or
+invalid regex, unreadable date, unknown instrument, over the cap, a non-positive `--limit`,
+an oversized attachment, an existing `--out` file without `--force`), and argparse's own
+refusals such as two conflicting flags · `3` `CREDENTIAL BLOCKED` · `4` **`SERVER ERROR`**:
+the call was made and the far end declined or answered oddly — any non-200 raised through
+`_api` (so every subcommand not in the `1` list above), a body that is not JSON, or a
+transport failure. `REFUSING:` means this skill stopped the call; `SERVER ERROR:` means it
+did not. One asymmetry worth
 knowing: `scope` exits `0` when it selects nothing where `search` exits `1`. A non-positive
 `--limit` is refused by every subcommand — as a slice bound it would widen the output rather
 than narrow it.
