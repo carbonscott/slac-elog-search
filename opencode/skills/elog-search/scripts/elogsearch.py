@@ -2272,8 +2272,43 @@ def _print_json(payload, chars, limit=None):
     print(_clip(text, chars))
 
 
+def refuse_sample_with_mode(args, winners):
+    """--sample is a MODIFIER, so a mode flag must not silently swallow it.
+
+    `--sample` narrows the by-experiment listing of `runs`, `files` and
+    `runtable --table`, because those are the only routes that take a
+    `sampleName` parameter.  The mode flags below reach different routes --
+    one run, the current run, the file counts, the table sources, the CSV
+    export -- none of which accept it, so the filter was read off the command
+    line and dropped, and the caller got a correct answer to a question they
+    did not ask.  That is the defect the mutually-exclusive groups were added
+    to remove; --sample cannot join those groups because it is legitimately
+    combinable with the default mode of each subcommand, so it is refused here
+    instead, the way `runtable --out` outside `--csv` is refused.
+
+    Honouring it was the alternative and it is worse: it would mean inventing a
+    client-side filter on routes whose payloads do not all carry a sample, or
+    sending a parameter the route ignores, and both answer the question by
+    guessing rather than by asking.
+
+    `winners` is (flag, is_set) pairs, checked in the handler's own branch
+    order so the message names the flag that actually won.
+    """
+    if not getattr(args, "sample", None):
+        return
+    for flag, is_set in winners:
+        if is_set:
+            raise ValueError(
+                "--sample %s cannot be combined with %s: that route has no "
+                "sampleName parameter, so the sample would be read and dropped."
+                "  Drop %s to filter by sample, or drop --sample to keep %s."
+                % (args.sample, flag, flag, flag))
+
+
 def cmd_runs(args):
     """The runs of an experiment, one run, or whichever run is current."""
+    refuse_sample_with_mode(args, [("--current", args.current),
+                                   ("--run", args.run is not None)])
     session, cred = _session_for(args)
     exp = {"experiment_name": args.experiment}
     if args.current:
@@ -2337,6 +2372,8 @@ def cmd_runtable(args):
             "--csv (with --table) to export, or drop --out.  Without --csv this "
             "command prints a formatted view, not the server's own bytes, and "
             "saving that under the name you gave would misrepresent it.")
+    refuse_sample_with_mode(args, [("--sources", args.sources),
+                                   ("--csv", args.csv)])
     session, cred = _session_for(args)
     exp = {"experiment_name": args.experiment}
     if args.sources:
@@ -2410,6 +2447,8 @@ def cmd_runtable(args):
 
 def cmd_files(args):
     """Which files exist for this experiment, or for one run."""
+    refuse_sample_with_mode(args, [("--counts", args.counts),
+                                   ("--run", args.run is not None)])
     session, cred = _session_for(args)
     exp = {"experiment_name": args.experiment}
     if args.counts:
@@ -3754,6 +3793,46 @@ def _selftest_logic():
          in _inspect.getsource(cmd_runtable),
          "the refusal names --csv, so the caller knows which flag to add")
 
+    # --sample is a modifier, not a mode: it used to be read and dropped
+    # whenever a mode flag won, which answers a question the caller did not ask.
+    class _SampleArgs(object):
+        experiment = "x"
+        sample = "GFP"
+        run = None
+        current = False
+        counts = False
+        table = None
+        sources = False
+        csv = False
+        out = None
+        force = False
+        limit = 20
+        chars = 6000
+        timeout = 300
+        auth = None
+
+    sample_modes = [
+        ("runs --run", cmd_runs, {"run": 42}),
+        ("runs --current", cmd_runs, {"current": True}),
+        ("files --run", cmd_files, {"run": 42}),
+        ("files --counts", cmd_files, {"counts": True}),
+        ("runtable --sources", cmd_runtable, {"sources": True}),
+        ("runtable --csv", cmd_runtable, {"csv": True, "table": "T"}),
+    ]
+    for label, handler, extra in sample_modes:
+        probe = _SampleArgs()
+        for key, value in extra.items():
+            setattr(probe, key, value)
+        name = "%s does not silently drop --sample" % label
+        try:
+            handler(probe)
+            case(False, name, "\n     the sample was accepted and dropped")
+        except ValueError as exc:
+            case("--sample" in str(exc), name,
+                 "" if "--sample" in str(exc) else "\n     %s" % exc)
+        except Exception as exc:                                   # noqa: BLE001
+            case(False, name, "\n     raised %s: %s" % (type(exc).__name__, exc))
+
     # --chars is the sibling flag with the same slice hazard, but 0 is
     # DOCUMENTED as "no limit" there, so the bound is < 0 rather than < 1.
     for bad in (-1, -5):
@@ -4667,7 +4746,8 @@ def build_parser():
     rn.add_argument("--params", action="store_true",
                     help="include each run's parameter dictionary (large: 4.4 MB "
                          "for a 314-run experiment)")
-    rn.add_argument("--sample", default=None, help="restrict to one sample")
+    rn.add_argument("--sample", default=None,
+                    help="restrict the run listing to one sample (not with --run/--current)")
     rn.add_argument("--json", action="store_true", help="raw documents instead of a table")
     rn.add_argument("--limit", type=int, default=RUNS_DEFAULT_LIMIT,
                     help="rows to print, newest last (default %d)" % RUNS_DEFAULT_LIMIT)
@@ -4686,7 +4766,8 @@ def build_parser():
                            help="where run-table columns come from")
     rtb_which.add_argument("--csv", action="store_true",
                            help="export the named table as CSV (needs --table)")
-    rtb.add_argument("--sample", default=None, help="restrict to one sample")
+    rtb.add_argument("--sample", default=None,
+                     help="restrict the table data to one sample (not with --sources/--csv)")
     rtb.add_argument("--out", default=None,
                      help="save the CSV here instead of printing it (needs --csv; "
                           "no other mode writes a file)")
@@ -4704,7 +4785,8 @@ def build_parser():
     fl_which.add_argument("--run", default=None, help="one run number")
     fl_which.add_argument("--counts", action="store_true",
                           help="counts by extension instead")
-    fl.add_argument("--sample", default=None, help="restrict to one sample")
+    fl.add_argument("--sample", default=None,
+                    help="restrict the file listing to one sample (not with --run/--counts)")
     fl.add_argument("--limit", type=int, default=20)
     fl.add_argument("--chars", type=int, default=6000)
     fl.add_argument("--timeout", type=int, default=300)
