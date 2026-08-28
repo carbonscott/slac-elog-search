@@ -2289,6 +2289,14 @@ def cmd_runtable(args):
         _print_json(data, args.chars, args.limit)
         return 0
     if not args.table:
+        if args.csv:
+            # The export route names its parameter `runtable` and aborts without
+            # it, so --csv cannot mean anything on its own.  Listing the tables
+            # here would answer a different question and quietly drop the flag.
+            raise ValueError(
+                "--csv exports ONE run table and there is no table to export: "
+                "name it with --table.  `runtable %s` on its own lists the "
+                "tables." % args.experiment)
         tables = _api(session, cred, R_RUN_TABLES, path_params=exp, timeout=args.timeout)
         print("experiment : %s" % args.experiment)
         print("run tables : %d   (name one with --table to see its data)" % len(tables or []))
@@ -3393,8 +3401,39 @@ def _selftest_policy():
 
 
 def _selftest_subcommands():
+    import contextlib as _contextlib
+    import io as _io
+
     results = []
     parser = build_parser()
+
+    # Flag pairs that cannot both be honoured.  These used to pick a winner in
+    # the handler, so the user got a plausible answer to a question they had not
+    # asked; argparse now refuses them.
+    conflicting = [
+        ["runs", "x", "--current", "--run", "42"],
+        ["files", "x", "--counts", "--run", "42"],
+        ["samples", "x", "--current", "--sample", "S"],
+        ["runtable", "x", "--sources", "--csv"],
+    ]
+    for argv in conflicting:
+        label = "conflicting flags are refused, not silently ranked: %s" % " ".join(argv[2:])
+        try:
+            with _contextlib.redirect_stderr(_io.StringIO()):
+                parser.parse_args(argv)
+            results.append((False, label, "\n     the parser accepted both"))
+        except SystemExit:
+            results.append((True, label, ""))
+    # ...and the combinations that remain legitimate still parse.
+    for argv in (["runs", "x", "--current"], ["files", "x", "--counts"],
+                 ["runtable", "x", "--table", "T", "--csv"]):
+        label = "a legitimate flag combination still parses: %s" % " ".join(argv[2:])
+        try:
+            with _contextlib.redirect_stderr(_io.StringIO()):
+                parser.parse_args(argv)
+            results.append((True, label, ""))
+        except SystemExit:
+            results.append((False, label, "\n     the parser refused it"))
     registered = set()
     for action in parser._subparsers._group_actions:              # noqa: SLF001
         registered.update(action.choices)
@@ -3935,6 +3974,21 @@ def _selftest_commands():
                         "\n     an int _id read as a missing attachment"))
         payloads["/lgbk/<experiment_name>/ws/elog/<entry_id>/complete_elog_tree"] = [entry]
 
+        # --csv with no --table cannot be satisfied: refuse it rather than
+        # listing the tables and dropping the flag.
+        args = _Args()
+        for key, value in {"table": None, "sources": False, "csv": True,
+                           "sample": None, "out": None}.items():
+            setattr(args, key, value)
+        label = "runtable --csv with no --table is refused, not answered differently"
+        try:
+            with _contextlib.redirect_stdout(_io.StringIO()):
+                cmd_runtable(args)
+            results.append((False, label, "\n     it listed the tables instead"))
+        except ValueError as exc:
+            results.append(("--table" in str(exc), label,
+                            "" if "--table" in str(exc) else "\n     %s" % exc))
+
         for name, handler, extra in commands:
             label = "command runs and cannot be made to forge a line: %s" % name
             problems = []
@@ -4316,8 +4370,12 @@ def build_parser():
     rn = sub.add_parser("runs", help="the runs of an experiment, one run, or the current run")
     add_global_flags(rn)
     rn.add_argument("experiment")
-    rn.add_argument("--run", default=None, help="one run number")
-    rn.add_argument("--current", action="store_true", help="whichever run is current")
+    # --run and --current name two different runs.  The handler used to pick a
+    # winner silently, which answers a question the user did not ask.
+    rn_which = rn.add_mutually_exclusive_group()
+    rn_which.add_argument("--run", default=None, help="one run number")
+    rn_which.add_argument("--current", action="store_true",
+                          help="whichever run is current")
     rn.add_argument("--params", action="store_true",
                     help="include each run's parameter dictionary (large: 4.4 MB "
                          "for a 314-run experiment)")
@@ -4334,9 +4392,12 @@ def build_parser():
     add_global_flags(rtb)
     rtb.add_argument("experiment")
     rtb.add_argument("--table", default=None, help="the run table's name")
-    rtb.add_argument("--sources", action="store_true",
-                     help="where run-table columns come from")
-    rtb.add_argument("--csv", action="store_true", help="export the named table as CSV")
+    # --sources answers a different question than a table's contents.
+    rtb_which = rtb.add_mutually_exclusive_group()
+    rtb_which.add_argument("--sources", action="store_true",
+                           help="where run-table columns come from")
+    rtb_which.add_argument("--csv", action="store_true",
+                           help="export the named table as CSV (needs --table)")
     rtb.add_argument("--sample", default=None, help="restrict to one sample")
     rtb.add_argument("--out", default=None, help="save the CSV here instead of printing it")
     rtb.add_argument("--limit", type=int, default=20)
@@ -4347,8 +4408,10 @@ def build_parser():
     fl = sub.add_parser("files", help="which files exist, for an experiment or one run")
     add_global_flags(fl)
     fl.add_argument("experiment")
-    fl.add_argument("--run", default=None, help="one run number")
-    fl.add_argument("--counts", action="store_true", help="counts by extension instead")
+    fl_which = fl.add_mutually_exclusive_group()
+    fl_which.add_argument("--run", default=None, help="one run number")
+    fl_which.add_argument("--counts", action="store_true",
+                          help="counts by extension instead")
     fl.add_argument("--sample", default=None, help="restrict to one sample")
     fl.add_argument("--limit", type=int, default=20)
     fl.add_argument("--chars", type=int, default=6000)
@@ -4358,8 +4421,10 @@ def build_parser():
     sm = sub.add_parser("samples", help="the samples of an experiment")
     add_global_flags(sm)
     sm.add_argument("experiment")
-    sm.add_argument("--sample", default=None, help="one sample by name")
-    sm.add_argument("--current", action="store_true", help="whichever sample is current")
+    sm_which = sm.add_mutually_exclusive_group()
+    sm_which.add_argument("--sample", default=None, help="one sample by name")
+    sm_which.add_argument("--current", action="store_true",
+                          help="whichever sample is current")
     sm.add_argument("--chars", type=int, default=6000)
     sm.add_argument("--timeout", type=int, default=120)
     sm.set_defaults(func=cmd_samples)
