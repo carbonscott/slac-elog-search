@@ -1582,20 +1582,6 @@ def cmd_search(args):
     except ValueError as exc:
         print("REFUSING: %s" % exc, file=sys.stderr)
         return 2
-    # LAST on purpose, and it must stay after the transport arm: requests'
-    # RequestException subclasses OSError, and a network failure has to keep
-    # reading as SERVER ERROR rather than as a local write failure.  What is
-    # left here is the caller's own filesystem -- a missing parent directory in
-    # --out, a read-only mount, a full disk, a permission denial.  That is
-    # neither a refusal by this skill (2) nor anything the server did (4), so it
-    # gets its own code rather than a bare traceback, which tells the caller
-    # nothing at all.
-    except OSError as exc:
-        print("LOCAL WRITE FAILED: %s: %s" % (type(exc).__name__, exc),
-              file=sys.stderr)
-        print("  The data was fetched; this skill could not write it to the path "
-              "you named.  The server is not involved.", file=sys.stderr)
-        return 5
     cred = resolve_credential(args.auth)
     session = new_session(cred)
 
@@ -3881,6 +3867,12 @@ def _selftest_logic():
          "still reads as SERVER ERROR")
     case(source.count("return 5") == 1,
          "exit code 5 is used for exactly one outcome")
+    # The exit-5 handler belongs to main() alone.  A copy of it once sat on
+    # cmd_search's date-parsing try, which only calls _normalise_date and does
+    # no I/O: unreachable, and its comment asserted an ordering relative to a
+    # transport arm that exists only here.
+    case("except OSError" not in inspect.getsource(cmd_search),
+         "the exit-5 arm lives only in main(), not on a try that does no I/O")
 
     # Credential expiry ranking, and the mode refusal, both previously uncovered.
     case(_sortable("12/31/2026 10:00:00") > _sortable("nonsense"),
