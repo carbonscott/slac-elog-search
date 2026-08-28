@@ -748,8 +748,30 @@ def _get(session, prefix, rule, path_params=None, params=None, timeout=120,
                        allow_redirects=False)
 
 
+class ServerError(ValueError):
+    """The SERVER said no, or answered with something unreadable.
+
+    "REFUSING" is this skill's own safety vocabulary: it means the policy
+    stopped the call before a socket was opened.  A 500 from the logbook, the
+    403 an ordinary reader gets on ws/global_roles, or an HTML error page under
+    a 200 is not that -- the call was made, and the far end declined.  Reporting
+    those as refusals tells a reader (and a model reading this output) that the
+    skill declined, which erodes the word where it matters.
+
+    So they raise this instead, and main() gives them their own message and exit
+    code 4.  It subclasses ValueError only so the narrow local fallbacks that
+    already catch an unreadable body -- cmd_get printing the raw text,
+    search_one recording "bad-json" -- keep working unchanged; main() catches
+    ServerError first, so it never prints as REFUSING.
+    """
+
+
 def _unwrap(response):
-    payload = response.json()
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise ServerError("the server answered with a body that is not JSON "
+                          "(%s); the call was made, this is not a refusal" % exc)
     if isinstance(payload, dict) and "value" in payload:
         return payload["value"]
     return payload
@@ -1616,12 +1638,17 @@ def _resolve_rule(text):
 
 
 def _api(session, cred, rule, path_params=None, params=None, timeout=120):
-    """One read-only call, unwrapped.  Raises on a non-200 with the body attached."""
+    """One read-only call, unwrapped.
+
+    A non-200 raises ServerError, not the ValueError a policy refusal raises:
+    the difference is who said no, and it is visible in both the message and the
+    exit code.
+    """
     response = _get(session, cred["prefix"], rule, path_params=path_params,
                     params=params, timeout=timeout)
     if response.status_code != 200:
-        raise ValueError("%s returned HTTP %d: %s"
-                         % (rule, response.status_code, response.text[:200]))
+        raise ServerError("%s returned HTTP %d: %s"
+                          % (rule, response.status_code, response.text[:200]))
     return _unwrap(response)
 
 
@@ -3406,6 +3433,30 @@ def _selftest_logic():
     case(_unwrap(_Payload([1, 2])) == [1, 2],
          "an unwrapped response is passed through")
 
+    # Who said no.  A server-side failure must not wear the word REFUSING, which
+    # this skill reserves for its own policy stopping a call.
+    class _BadJSON(object):
+        def json(self):
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+    try:
+        _unwrap(_BadJSON())
+        case(False, "an unreadable body raises ServerError, not a refusal",
+             "\n     nothing was raised")
+    except ServerError:
+        case(True, "an unreadable body raises ServerError, not a refusal")
+    except ValueError as exc:
+        case(False, "an unreadable body raises ServerError, not a refusal",
+             "\n     got a bare ValueError: %s" % exc)
+    case(issubclass(ServerError, ValueError),
+         "ServerError subclasses ValueError, so local json fallbacks still catch it")
+    import inspect
+    source = inspect.getsource(main)
+    case(source.index("except ServerError") < source.index("except ValueError"),
+         "main() catches ServerError before ValueError, so it never prints REFUSING")
+    case("return 4" in source.split("except ServerError")[1].split("except ValueError")[0],
+         "a server-side failure exits 4, not the 2 reserved for policy refusals")
+
     # Credential expiry ranking, and the mode refusal, both previously uncovered.
     case(_sortable("12/31/2026 10:00:00") > _sortable("nonsense"),
          "an unparseable expiry sorts below a real one")
@@ -4161,6 +4212,20 @@ def build_parser():
     return parser
 
 
+def _transport_error_types():
+    """requests' transport exceptions, as a tuple `except` can take.
+
+    Lazy, because requests is imported per-subcommand and the offline ones
+    (`routes`, `selftest`) must keep working without it.  An empty tuple never
+    matches, so a missing requests changes nothing.
+    """
+    try:
+        import requests
+    except ImportError:
+        return ()
+    return (requests.exceptions.RequestException,)
+
+
 def main():
     args = build_parser().parse_args()
     try:
@@ -4168,6 +4233,18 @@ def main():
     except CredentialError as exc:
         print("CREDENTIAL BLOCKED: %s" % exc, file=sys.stderr)
         return 3
+    # Before the ValueError arm on purpose: ServerError subclasses it, and a
+    # server-side failure must not print in the vocabulary of a policy refusal.
+    except ServerError as exc:
+        print("SERVER ERROR: %s" % exc, file=sys.stderr)
+        print("  The call was made; the server declined or answered oddly.  "
+              "This is not a refusal by this skill.", file=sys.stderr)
+        return 4
+    except _transport_error_types() as exc:
+        print("SERVER ERROR: %s: %s" % (type(exc).__name__, exc), file=sys.stderr)
+        print("  The call could not be completed against the server.  "
+              "This is not a refusal by this skill.", file=sys.stderr)
+        return 4
     except ValueError as exc:
         print("REFUSING: %s" % exc, file=sys.stderr)
         return 2
