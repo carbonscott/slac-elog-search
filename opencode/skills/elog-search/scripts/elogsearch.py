@@ -1394,6 +1394,11 @@ def _no_control(value):
 def print_entry(experiment, doc, kind, chars, query=""):
     if kind == "context":
         tag = "  [thread context -- did not match the query]"
+    elif kind == "thread":
+        # `thread` prints the entry the caller named together with every reply
+        # under it.  Without this the two are indistinguishable in the output,
+        # and the caller cannot tell which document is the one they asked for.
+        tag = "  [reply in this thread -- not the entry you named]"
     elif doc.get("_no_visible_match"):
         tag = "  [server matched this, but not in its readable text]"
     else:
@@ -1899,7 +1904,11 @@ def cmd_thread(args):
     print("thread     : %d document(s); %d suppressed as deleted" % (returned, dropped))
     print()
     for doc in docs:
-        kind = "entry" if doc.get("_id") == args.entry_id else "thread"
+        # Both ids compared as strings, for the same reason _find_attachment
+        # does it: the id arrives from the CLI as str and comes back from Mongo
+        # as whatever the document holds.  Raw, a non-str _id made EVERY
+        # document look like a reply and the named entry vanished into the pile.
+        kind = "entry" if str(doc.get("_id")) == str(args.entry_id) else "thread"
         print_entry(args.experiment, doc, kind, args.chars)
     return 0
 
@@ -3846,6 +3855,23 @@ def _selftest_logic():
     plain = buffer.getvalue()
     case("Be lens alignment" in plain and "opr" in plain,
          "print_entry still shows ordinary content")
+
+    # thread: the entry the caller named must be distinguishable from its
+    # replies, and the ids must compare as strings (a Mongo _id is not always
+    # one) or every document reads as a reply.
+    case('str(doc.get("_id")) == str(args.entry_id)'
+         in _inspect.getsource(cmd_thread),
+         "thread compares entry ids as strings, so an int _id still matches")
+    buffer = _io.StringIO()
+    with _contextlib.redirect_stdout(buffer):
+        print_entry("mfxlv4920", {"_id": "B", "author": "opr", "content": "reply"},
+                    "thread", 100)
+    reply = buffer.getvalue()
+    case("[reply in this thread" in reply,
+         "a thread reply is marked as one, not printed as the named entry",
+         "" if "[reply in this thread" in reply else "\n     %r" % reply[:200])
+    case("[reply in this thread" not in plain,
+         "the named entry itself carries no reply marker")
 
     # cmd_routes is the command this campaign is most often quoted from, and no
     # case ran it until now: the summary line was checked by eye every time.
