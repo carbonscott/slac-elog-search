@@ -3465,6 +3465,9 @@ def _selftest_subcommands():
         ["files", "x", "--counts", "--run", "42"],
         ["samples", "x", "--current", "--sample", "S"],
         ["runtable", "x", "--sources", "--csv"],
+        ["workflows", "x", "--definitions", "--job", "J"],
+        ["workflows", "x", "--definitions", "--triggers"],
+        ["workflows", "x", "--triggers", "--job", "J"],
     ]
     for argv in conflicting:
         label = "conflicting flags are refused, not silently ranked: %s" % " ".join(argv[2:])
@@ -3476,7 +3479,8 @@ def _selftest_subcommands():
             results.append((True, label, ""))
     # ...and the combinations that remain legitimate still parse.
     for argv in (["runs", "x", "--current"], ["files", "x", "--counts"],
-                 ["runtable", "x", "--table", "T", "--csv"]):
+                 ["runtable", "x", "--table", "T", "--csv"],
+                 ["workflows", "x", "--job", "J", "--action", "job_log_file"]):
         label = "a legitimate flag combination still parses: %s" % " ".join(argv[2:])
         try:
             with _contextlib.redirect_stderr(_io.StringIO()):
@@ -4519,9 +4523,17 @@ def build_parser():
                         help="analysis jobs: what ran, and why it failed")
     add_global_flags(wf)
     wf.add_argument("experiment")
-    wf.add_argument("--definitions", action="store_true", help="the job definitions")
-    wf.add_argument("--triggers", action="store_true", help="what starts them")
-    wf.add_argument("--job", default=None, help="one job's _id, to proxy an action for it")
+    # Three modes, three different answers.  Without the group the handler picked
+    # a winner silently -- `--definitions --job J --action job_log_file` printed
+    # the definitions and dropped the job -- which answers a question the user
+    # did not ask.  SKILL.md already documents the shape as exclusive; this makes
+    # the documented shape the enforced one.  --action accompanies --job and is
+    # not itself a mode, so it stays outside the group.
+    wf_which = wf.add_mutually_exclusive_group()
+    wf_which.add_argument("--definitions", action="store_true", help="the job definitions")
+    wf_which.add_argument("--triggers", action="store_true", help="what starts them")
+    wf_which.add_argument("--job", default=None,
+                          help="one job's _id, to proxy an action for it")
     wf.add_argument("--action", default="job_statuses", choices=list(WORKFLOW_ACTIONS),
                     help="the proxied action (default job_statuses); job_log_file is "
                          "the one that says why a job failed")
