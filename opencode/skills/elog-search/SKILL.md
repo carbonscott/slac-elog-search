@@ -29,7 +29,7 @@ such attachment; `--preview` was asked for on an attachment that has none · `2`
 this skill**: the route policy (a mutating or denied route, a refused parameter, a workflow
 action the logbook does not proxy), an argument it will not accept (empty query, runaway or
 invalid regex, unreadable date, unknown instrument, over the cap, a non-positive `--limit`,
-an oversized attachment, an existing `--out` file without `--force`), and argparse's own
+a negative `--chars`, an oversized attachment, an existing `--out` file without `--force`), and argparse's own
 refusals such as two conflicting flags · `3` `CREDENTIAL BLOCKED` · `4` **`SERVER ERROR`**:
 the call was made and the far end declined or answered oddly — any non-200 raised through
 `_api` (so every subcommand not in the `1` list above), a body that is not JSON, or a
@@ -40,7 +40,8 @@ a full disk, a permission denial. `REFUSING:` means this skill stopped the call;
 own filesystem did not. One asymmetry worth
 knowing: `scope` exits `0` when it selects nothing where `search` exits `1`. A non-positive
 `--limit` is refused by every subcommand — as a slice bound it would widen the output rather
-than narrow it.
+than narrow it. A negative `--chars` is refused for the same reason: it would cut the end off
+the text instead of bounding the start. `--chars 0` still means no limit.
 
 `reference/elog-api-notes.md`, next to this file, documents the underlying API — endpoint
 prefixes, the entry document shape, and the server-side search semantics this skill has to

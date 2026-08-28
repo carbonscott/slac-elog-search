@@ -3689,6 +3689,33 @@ def _selftest_logic():
     case("refuse_bad_limit(args)" in _inspect.getsource(main),
          "the limit check is wired into main(), not just defined")
 
+    # --chars is the sibling flag with the same slice hazard, but 0 is
+    # DOCUMENTED as "no limit" there, so the bound is < 0 rather than < 1.
+    for bad in (-1, -5):
+        probe = _Limited()
+        probe.chars = bad
+        try:
+            refuse_bad_chars(probe)
+            case(False, "a --chars of %d is refused" % bad, "\n     it was accepted")
+        except ValueError:
+            case(True, "a --chars of %d is refused" % bad)
+    for good in (0, 1, 6000):
+        probe = _Limited()
+        probe.chars = good
+        try:
+            refuse_bad_chars(probe)
+            case(True, "a --chars of %d is still accepted" % good)
+        except ValueError as exc:
+            case(False, "a --chars of %d is still accepted" % good, "\n     %s" % exc)
+    probe = _Limited()
+    try:
+        refuse_bad_chars(probe)
+        case(True, "a subcommand with no --chars is unaffected")
+    except ValueError as exc:
+        case(False, "a subcommand with no --chars is unaffected", "\n     %s" % exc)
+    case("refuse_bad_chars(args)" in _inspect.getsource(main),
+         "the chars check is wired into main(), not just defined")
+
     # The only destructive act in a read-only tool: replacing a file at --out.
     import tempfile as _tempfile
     handle = _tempfile.NamedTemporaryFile(delete=False)
@@ -4633,6 +4660,28 @@ def refuse_bad_limit(args):
             "positive number." % limit)
 
 
+def refuse_bad_chars(args):
+    """--chars is a WIDTH.  A negative one is not a narrower width, it is a
+    different and silent answer.
+
+    `get` slices `text[:args.chars]`, so `--chars -5` drops the tail instead of
+    bounding the head, and in `_excerpt` a negative width flips the sign of
+    `chars // 3`, so `search --chars -5` on a matching query prints literally
+    `'......'` -- six dots and no content, with nothing to say why.
+
+    `0` is documented as "no limit" for --chars, so unlike --limit the bound here
+    is `< 0`, not `< 1`.  Checked in main() beside refuse_bad_limit so every
+    subcommand agrees rather than each one remembering.
+    """
+    chars = getattr(args, "chars", None)
+    if chars is not None and chars < 0:
+        raise ValueError(
+            "--chars %d is not a width.  As a slice bound a negative width cuts "
+            "the END off the text instead of bounding the start, and in an "
+            "excerpt it collapses the output to ellipses with no content.  Give "
+            "a positive number, or 0 for no limit." % chars)
+
+
 def _transport_error_types():
     """requests' transport exceptions, as a tuple `except` can take.
 
@@ -4651,6 +4700,7 @@ def main():
     args = build_parser().parse_args()
     try:
         refuse_bad_limit(args)
+        refuse_bad_chars(args)
         return args.func(args)
     except CredentialError as exc:
         print("CREDENTIAL BLOCKED: %s" % exc, file=sys.stderr)
