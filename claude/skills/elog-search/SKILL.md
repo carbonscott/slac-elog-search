@@ -242,17 +242,70 @@ reads.
 
 ## Read-only by construction
 
-`elogsearch.py` routes every HTTP call through one function that refuses any route
-outside a four-entry allowlist -- `experiments`, `get_cached_experiment_names`,
-`experiment_names_updated_within`, `search_elog`. All four are GETs. No route that
-creates, edits, removes or cross-posts an entry appears anywhere in this skill, so
-there is no code path to reach one, and `grep` over `scripts/` will show none.
+Every HTTP call this skill can make goes through one function, `_get()`, and that function
+refuses any route the vendored inventory does not classify **read-only**. The inventory
+covers every GET-accepting route the logbook service exposes, classified by **effect, not
+by HTTP method** — because explgbk answers GET on routes that end runs, close shifts,
+cross-post entries, subscribe people to email, toggle collaborator roles, kill analysis
+jobs and force cache rebuilds. A skill that allowed "any GET" could do all of that to the
+production logbook during beam time.
 
-Entry **content is never written to disk** — not cached, not logged. Only experiment
-metadata (names, instruments, dates) is cached, at mode 0600 with a 6 h TTL, in
-`$XDG_CACHE_HOME/elog-search/experiments.json` — falling back to
+```bash
+$SKILL_DIR/scripts/elogsearch.py routes            # the whole inventory and why
+$SKILL_DIR/scripts/elogsearch.py routes --only denied
+```
+
+The last line of `routes` is the summary, and it is what to quote when someone asks what
+this skill is allowed to do. The three classes are:
+
+| class | meaning |
+|---|---|
+| **read-only** | callable |
+| **mutating** | accepts GET and changes server state — refused, always |
+| **denied** | read-only by the letter of the rule, refused anyway: it leaves the logbook, mints a credential, or has nothing to read |
+
+The four **denied** routes are `generate_arp_token` (mints a bearer credential),
+`ext_preview` (302s to an external host with a secret-derived cookie), `lookup_experiment_in_urawi`
+(reaches an external system) and `empty` (returns `{}`).
+
+`selftest` proves the refusals **offline**: it asserts that `_get()` raises for every
+mutating and denied route before any socket is opened. That is deliberate — demonstrating
+these refusals against the live server would mean ending a run to show that the skill
+cannot end a run.
+
+`selftest` also **pins the inventory**. A deny-list model is permissive by construction: a
+future logbook release that added a new mutating GET would fall inside the allowed set in
+silence. So a copy of the upstream route list is checked in at
+`reference/explgbk-get-routes.txt`, and the pin case fails when the script's inventory and
+that file disagree. If it fails, re-read the new routes' handlers before touching the
+inventory.
+
+### Writing to disk
+
+Entry **content is never written to disk as a side effect of searching** — not cached, not
+logged, not spilled into a scratch file while a search runs. The one deliberate exception
+is `attachment --out PATH`: fetching an attachment to a path the user named is the thing
+the user asked for, not a side effect, and without `--out` nothing is written at all. The
+saved file's extension comes from this skill's own type map, never from the `type` string
+the server returns, because that string is whatever the uploader's browser claimed.
+
+Only experiment metadata (names, instruments, dates) is cached, at mode 0600 with a 6 h
+TTL, in `$XDG_CACHE_HOME/elog-search/experiments.json` — falling back to
 `~/.cache/elog-search/experiments.json` only when `XDG_CACHE_HOME` is unset, which on S3DF
 it usually is not. `--refresh` re-fetches it.
+
+### Load rules
+
+The logbook is production and live during beam time, so these are limits, not preferences:
+
+* **One attachment or workflow-proxy call at a time.** Never fan out over them. Attachment
+  bytes come from the image store rather than the logbook database, and the workflow proxy
+  makes an outbound call to the job daemon; both are far heavier than a logbook query.
+* **`CONCURRENCY = 4` and `DEFAULT_SCOPE_CAP = 150` are measured limits and are not
+  exposed as flags.** Do not raise them, and do not sweep all ~2240 experiments: a full
+  sweep is a load event, not a query.
+* **`entries` caps client-side.** The whole-logbook route has no server-side limit, so the
+  skill applies its own.
 
 ## Search syntax
 

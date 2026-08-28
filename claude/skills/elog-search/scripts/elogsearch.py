@@ -6,7 +6,8 @@
 """Search the LCLS eLog as yourself, read-only, with the search scope always stated.
 
 Read-only by construction: every HTTP call this script can make is routed through
-`_get()`, which refuses any route not present in READ_ROUTES below.  There is no
+`_get()`, which refuses any route the vendored inventory below does not classify
+read-only -- including the 27 explgbk routes that accept GET and yet write.  There is no
 code path that posts, edits, deletes or cross-posts an entry.
 
 Scope is an engineering decision, not an authorization one.  The eLog has no
@@ -32,18 +33,220 @@ import subprocess
 import sys
 import time
 from datetime import datetime
+from urllib.parse import quote
 
 BASE = "https://pswww.slac.stanford.edu"
 
-# The complete set of routes this script is permitted to call.  Every one is a
-# GET and every one is read-only.  _get() refuses anything not listed here, so
-# the read-only guarantee is enforced in code rather than promised in a comment.
-READ_ROUTES = {
-    "experiments",                      # global: experiments the caller may read
-    "get_cached_experiment_names",      # global: all experiment names (anonymous)
-    "experiment_names_updated_within",  # global: recently-active names (anonymous)
-    "search_elog",                      # per-experiment: the search itself
+# >>> ROUTE POLICY (generated block; edit gen_inventory.py, not this) >>>
+# --------------------------------------------------------------------------
+# route policy -- a deny-list model, enforced in code
+# --------------------------------------------------------------------------
+#
+# The rule this skill enforces is "does not mutate eLog state", NOT "is an HTTP
+# GET".  explgbk answers GET on routes that end runs, close shifts, cross-post
+# entries, subscribe people to email, toggle collaborator roles, kill analysis
+# jobs and force cache rebuilds.  A skill that allowed every GET would be able
+# to do all of that to the production logbook, live, during beam time.
+#
+# So the inventory below classifies EVERY GET-accepting route explgbk exposes
+# into exactly one of three classes, and _get() refuses anything not readonly:
+#
+#   readonly   the skill may call it
+#   mutating   it accepts GET and changes server state -- never called, and the
+#              refusal is proven offline in selftest rather than against the
+#              live server
+#   denied     read-only by the letter of the rule, refused anyway: it leaves
+#              the logbook, mints a credential, or has nothing to read.  The
+#              reason is named in DENIAL_REASONS, one per route.
+#
+# The inventory is VENDORED, not discovered at run time.  A copy of the upstream
+# route list is checked in at reference/explgbk-get-routes.txt and `selftest`
+# fails when the two disagree.  That pin is the whole mitigation for the one
+# weakness of a deny-list model: a future explgbk release adding a 28th mutating
+# GET would otherwise fall inside the permitted set in silence.
+
+ROUTE_INVENTORY = (
+    # DENIED -- read-only by the letter of the rule, refused anyway.
+    # Each one is refused for a reason named in DENIAL_REASONS below.
+    ("denied", "/lgbk/<experiment_name>/ws/ext_preview/<path:path>"),
+    ("denied", "/lgbk/<experiment_name>/ws/generate_arp_token"),
+    ("denied", "/lgbk/ws/empty"),
+    ("denied", "/lgbk/ws/lookup_experiment_in_urawi"),
+
+    # MUTATING -- these accept GET and CHANGE SERVER STATE.  They are the
+    # reason this skill classifies by effect and not by HTTP method.
+    ("mutating", "/lgbk/<experiment_name>/migrate_attachments"),
+    ("mutating", "/lgbk/<experiment_name>/ws/add_collaborator"),
+    ("mutating", "/lgbk/<experiment_name>/ws/change_sample_for_run"),
+    ("mutating", "/lgbk/<experiment_name>/ws/check_and_move_run_files_to_location"),
+    ("mutating", "/lgbk/<experiment_name>/ws/clone_sample"),
+    ("mutating", "/lgbk/<experiment_name>/ws/clone_system_template_run_tables"),
+    ("mutating", "/lgbk/<experiment_name>/ws/close_shift"),
+    ("mutating", "/lgbk/<experiment_name>/ws/cross_post_elogs"),
+    ("mutating", "/lgbk/<experiment_name>/ws/delete_workflow_job"),
+    ("mutating", "/lgbk/<experiment_name>/ws/elog_email_subscribe"),
+    ("mutating", "/lgbk/<experiment_name>/ws/elog_email_unsubscribe"),
+    ("mutating", "/lgbk/<experiment_name>/ws/file_available_at_location"),
+    ("mutating", "/lgbk/<experiment_name>/ws/kill_workflow_job"),
+    ("mutating", "/lgbk/<experiment_name>/ws/make_sample_current"),
+    ("mutating", "/lgbk/<experiment_name>/ws/remove_collaborator"),
+    ("mutating", "/lgbk/<experiment_name>/ws/stop_current_sample"),
+    ("mutating", "/lgbk/<experiment_name>/ws/sync_collaborators_with_user_portal"),
+    ("mutating", "/lgbk/<experiment_name>/ws/sync_posix_group"),
+    ("mutating", "/lgbk/<experiment_name>/ws/toggle_role"),
+    ("mutating", "/lgbk/ws/projects/<prjid>/grids/<gridid>/linksession"),
+    ("mutating", "/lgbk/ws/rebuild_experiment_cache_for_experiment"),
+    ("mutating", "/lgbk/ws/reload_experiment_cache"),
+    ("mutating", "/lgbk/ws/reload_named_cache"),
+    ("mutating", "/lgbk/ws/sync_collaborators_with_user_portal_for_upcoming_experiments"),
+    ("mutating", "/run_control/<experiment_name>/ws/end_run"),
+    ("mutating", "/run_control/<experiment_name>/ws/start_run"),
+
+    # READ-ONLY -- everything the skill is permitted to call.
+    ("readonly", "/lgbk/<experiment_name>/ws/<run_num>/current_files_for_live_mode"),
+    ("readonly", "/lgbk/<experiment_name>/ws/<run_num>/current_files_for_live_mode_at_location"),
+    ("readonly", "/lgbk/<experiment_name>/ws/<run_num>/daq_run_params"),
+    ("readonly", "/lgbk/<experiment_name>/ws/<run_num>/files"),
+    ("readonly", "/lgbk/<experiment_name>/ws/<run_num>/files_for_live_mode"),
+    ("readonly", "/lgbk/<experiment_name>/ws/<run_num>/files_for_live_mode_at_location"),
+    ("readonly", "/lgbk/<experiment_name>/ws/<run_num>/get_params_matching_prefix"),
+    ("readonly", "/lgbk/<experiment_name>/ws/<run_num>/get_tags_for_run"),
+    ("readonly", "/lgbk/<experiment_name>/ws/attachment"),
+    ("readonly", "/lgbk/<experiment_name>/ws/collaborators"),
+    ("readonly", "/lgbk/<experiment_name>/ws/current_files_for_live_mode_at_location"),
+    ("readonly", "/lgbk/<experiment_name>/ws/current_run"),
+    ("readonly", "/lgbk/<experiment_name>/ws/current_sample_name"),
+    ("readonly", "/lgbk/<experiment_name>/ws/dm_locations"),
+    ("readonly", "/lgbk/<experiment_name>/ws/elog"),
+    ("readonly", "/lgbk/<experiment_name>/ws/elog/<entry_id>/complete_elog_tree"),
+    ("readonly", "/lgbk/<experiment_name>/ws/elog_email_subscriptions"),
+    ("readonly", "/lgbk/<experiment_name>/ws/elog_emails"),
+    ("readonly", "/lgbk/<experiment_name>/ws/exp_posix_group_members"),
+    ("readonly", "/lgbk/<experiment_name>/ws/file_counts_by_extension"),
+    ("readonly", "/lgbk/<experiment_name>/ws/files"),
+    ("readonly", "/lgbk/<experiment_name>/ws/files_for_live_mode_at_location"),
+    ("readonly", "/lgbk/<experiment_name>/ws/get_elog_tags"),
+    ("readonly", "/lgbk/<experiment_name>/ws/get_feedback_document"),
+    ("readonly", "/lgbk/<experiment_name>/ws/get_instrument_elogs"),
+    ("readonly", "/lgbk/<experiment_name>/ws/get_latest_shift"),
+    ("readonly", "/lgbk/<experiment_name>/ws/get_modal_param_definitions"),
+    ("readonly", "/lgbk/<experiment_name>/ws/get_run_params_for_all_runs"),
+    ("readonly", "/lgbk/<experiment_name>/ws/get_runs_matching_editable"),
+    ("readonly", "/lgbk/<experiment_name>/ws/get_runs_to_tags"),
+    ("readonly", "/lgbk/<experiment_name>/ws/get_runs_with_tag"),
+    ("readonly", "/lgbk/<experiment_name>/ws/get_tags_to_runs"),
+    ("readonly", "/lgbk/<experiment_name>/ws/has_role"),
+    ("readonly", "/lgbk/<experiment_name>/ws/info"),
+    ("readonly", "/lgbk/<experiment_name>/ws/internalinfo"),
+    ("readonly", "/lgbk/<experiment_name>/ws/map_param_editable_to_run_nums"),
+    ("readonly", "/lgbk/<experiment_name>/ws/run_param_descriptions"),
+    ("readonly", "/lgbk/<experiment_name>/ws/run_table_data"),
+    ("readonly", "/lgbk/<experiment_name>/ws/run_table_sources"),
+    ("readonly", "/lgbk/<experiment_name>/ws/run_tables"),
+    ("readonly", "/lgbk/<experiment_name>/ws/runs"),
+    ("readonly", "/lgbk/<experiment_name>/ws/runs/<run_num>"),
+    ("readonly", "/lgbk/<experiment_name>/ws/runs_for_calib"),
+    ("readonly", "/lgbk/<experiment_name>/ws/runtables/export_as_csv"),
+    ("readonly", "/lgbk/<experiment_name>/ws/samples"),
+    ("readonly", "/lgbk/<experiment_name>/ws/samples/"),
+    ("readonly", "/lgbk/<experiment_name>/ws/samples/<sample_name>"),
+    ("readonly", "/lgbk/<experiment_name>/ws/search_elog"),
+    ("readonly", "/lgbk/<experiment_name>/ws/shifts"),
+    ("readonly", "/lgbk/<experiment_name>/ws/workflow/<job_id>/<path:action>"),
+    ("readonly", "/lgbk/<experiment_name>/ws/workflow_definitions"),
+    ("readonly", "/lgbk/<experiment_name>/ws/workflow_jobs"),
+    ("readonly", "/lgbk/<experiment_name>/ws/workflow_triggers"),
+    ("readonly", "/lgbk/filemanager_file_types"),
+    ("readonly", "/lgbk/get_modal_param_definitions"),
+    ("readonly", "/lgbk/naming_conventions"),
+    ("readonly", "/lgbk/ws/activeexperiment_for_instrument_station"),
+    ("readonly", "/lgbk/ws/activeexperiments"),
+    ("readonly", "/lgbk/ws/api_endpoints"),
+    ("readonly", "/lgbk/ws/experiment_daily_data_breakdown"),
+    ("readonly", "/lgbk/ws/experiment_names_updated_within"),
+    ("readonly", "/lgbk/ws/experiment_stats"),
+    ("readonly", "/lgbk/ws/experiments"),
+    ("readonly", "/lgbk/ws/experiments_to_proposal"),
+    ("readonly", "/lgbk/ws/experiments_with_user_as_collaborator"),
+    ("readonly", "/lgbk/ws/get_cached_experiment_names"),
+    ("readonly", "/lgbk/ws/get_matching_groups"),
+    ("readonly", "/lgbk/ws/get_matching_uids"),
+    ("readonly", "/lgbk/ws/get_params_matching_prefix"),
+    ("readonly", "/lgbk/ws/global_roles"),
+    ("readonly", "/lgbk/ws/instrument_station_list"),
+    ("readonly", "/lgbk/ws/instrument_switch_history"),
+    ("readonly", "/lgbk/ws/instruments"),
+    ("readonly", "/lgbk/ws/ops_search_exp_infos"),
+    ("readonly", "/lgbk/ws/poc_feedback/experiments"),
+    ("readonly", "/lgbk/ws/poc_feedback/schema"),
+    ("readonly", "/lgbk/ws/postable_experiments"),
+    ("readonly", "/lgbk/ws/potentiallyactiveusers"),
+    ("readonly", "/lgbk/ws/projects"),
+    ("readonly", "/lgbk/ws/projects/<prjid>"),
+    ("readonly", "/lgbk/ws/projects/<prjid>/grids"),
+    ("readonly", "/lgbk/ws/projects/<prjid>/grids/<gridid>"),
+    ("readonly", "/lgbk/ws/projects/<prjid>/sessions"),
+    ("readonly", "/lgbk/ws/search_experiment_info"),
+    ("readonly", "/lgbk/ws/sorted_experiment_ids"),
+    ("readonly", "/lgbk/ws/usergroups"),
+    ("readonly", "/run_control/<experiment_name>/ws/current_run"),
+
+)
+
+# The upstream revision this inventory was read from.  `routes` prints it and
+# reference/explgbk-get-routes.txt names it too, so a stale vendored list is
+# visible rather than merely wrong.
+UPSTREAM_COMMIT = "slaclab/explgbk@e5484aa"
+
+# Why each denied route is denied.  These are the four that pass the literal
+# include rule and are refused anyway; the reason travels with the refusal so a
+# caller is never left guessing whether it is a bug.
+DENIAL_REASONS = {
+    "/lgbk/<experiment_name>/ws/generate_arp_token":
+        "it mints a bearer credential for the job daemon.  Issuing credentials "
+        "is outside what a read-only search skill should be able to do, even "
+        "though the route writes nothing to the eLog.",
+    "/lgbk/<experiment_name>/ws/ext_preview/<path:path>":
+        "it is not an attachment fetch: it 302-redirects to an external host "
+        "and sets a cookie holding an MD5 of the experiment name plus a "
+        "server-side secret.  The same bytes are reachable through "
+        "attachment?prefer_preview=true, so nothing is lost.",
+    "/lgbk/ws/lookup_experiment_in_urawi":
+        "it reaches URAWI, an external system, not the logbook -- an unbounded "
+        "outside dependency with nothing to do with searching the eLog.",
+    "/lgbk/ws/empty":
+        "it returns {}.  A convenience for the web UI's JavaScript with "
+        "nothing in it to read.",
 }
+
+# One read-only route has a query parameter that changes state, so the refusal
+# has to be finer-grained than the route.  `/lgbk/ws/experiments?legacy_cutoff=N`
+# reaches `cat.set_legacy_cutoff(N)` (services/explgbk.py:335-339), which rebinds
+# a field on the module-level `CategorizerWithLegacy()` singleton in
+# `categorizers["instrument_runperiod"]`.  That is in-process presentation state,
+# not eLog state -- nothing is persisted and a worker restart clears it -- so the
+# route stays read-only.  But one caller would change how that worker buckets the
+# experiment list for every later request, which is not this skill's business.
+# The route is needed (it IS the authorization boundary: it answers "what may I
+# read"), so the parameter is refused rather than the route.
+REFUSED_PARAMS = {
+    "/lgbk/ws/experiments": {
+        "legacy_cutoff":
+            "it rebinds a shared server-side categorizer object, changing how "
+            "that worker process buckets experiments for every later request",
+    },
+}
+
+ROUTE_CLASS = dict((rule, klass) for klass, rule in ROUTE_INVENTORY)
+READONLY_ROUTES = frozenset(r for k, r in ROUTE_INVENTORY if k == "readonly")
+MUTATING_ROUTES = frozenset(r for k, r in ROUTE_INVENTORY if k == "mutating")
+DENIED_ROUTES = frozenset(r for k, r in ROUTE_INVENTORY if k == "denied")
+
+# Routes named often enough in code and documentation to deserve a name.
+R_EXPERIMENTS = "/lgbk/ws/experiments"
+R_NAMES_UPDATED_WITHIN = "/lgbk/ws/experiment_names_updated_within"
+R_SEARCH_ELOG = "/lgbk/<experiment_name>/ws/search_elog"
+# <<< ROUTE POLICY <<<
 
 # Fan-out concurrency.  Fixed, not tunable from the command line: this is the
 # production logbook the hutches depend on during beam time, and a miss costs the
@@ -394,16 +597,64 @@ def auth_headers(cred):
 # HTTP -- read routes only
 # --------------------------------------------------------------------------
 
-def _get(session, prefix, route, experiment=None, params=None, timeout=120):
-    if route not in READ_ROUTES:
-        raise RuntimeError(
-            "refusing to call '%s': not in this skill's read-only route allowlist %s"
-            % (route, sorted(READ_ROUTES)))
-    if experiment:
-        url = "%s/%s/lgbk/lgbk/%s/ws/%s" % (BASE, prefix, experiment, route)
-    else:
-        url = "%s/%s/lgbk/lgbk/ws/%s" % (BASE, prefix, route)
-    return session.get(url, params=params or {}, timeout=timeout)
+_PATH_PARAM = re.compile(r"<(?:[a-z]+:)?([A-Za-z_][A-Za-z0-9_]*)>")
+
+
+def _fill_rule(rule, path_params):
+    """Substitute a flask rule's path parameters, refusing to leave one unfilled.
+
+    A half-filled rule is the dangerous case, not the empty one: it would send a
+    literal `<run_num>` to the server and read back whatever that happens to
+    match.  So an unsubstituted parameter is an error, never a request.
+    """
+    filled = rule
+    for name, value in (path_params or {}).items():
+        for token in ("<%s>" % name, "<path:%s>" % name, "<int:%s>" % name):
+            if token in filled:
+                # A path parameter is one segment, so '/' must not survive it --
+                # except for the <path:...> converter, which is defined to eat
+                # slashes and whose only user here is a denied route anyway.
+                safe = "/" if token.startswith("<path:") else ""
+                filled = filled.replace(token, quote(str(value), safe=safe))
+                break
+        else:
+            raise ValueError("route %s has no path parameter %r" % (rule, name))
+    missing = _PATH_PARAM.findall(filled)
+    if missing:
+        raise ValueError("route %s still needs path parameter(s): %s"
+                         % (rule, ", ".join(missing)))
+    return filled
+
+
+def _get(session, prefix, rule, path_params=None, params=None, timeout=120,
+         stream=False):
+    """The single HTTP choke point.  Every call the skill can make passes here.
+
+    The refusals below are the read-only guarantee.  They are checked BEFORE the
+    URL is built and before any socket is opened, which is what lets `selftest`
+    prove them without a credential and without touching the server.
+    """
+    klass = ROUTE_CLASS.get(rule)
+    if klass is None:
+        raise ValueError(
+            "refusing to call %r: it is not in this skill's vendored inventory of "
+            "explgbk routes.  `elogsearch.py routes` lists all %d."
+            % (rule, len(ROUTE_INVENTORY)))
+    if klass == "mutating":
+        raise ValueError(
+            "refusing to call %r: it accepts GET but CHANGES SERVER STATE.  This "
+            "skill is read-only by construction, and %d of explgbk's GET routes "
+            "mutate; every one of them is refused here."
+            % (rule, len(MUTATING_ROUTES)))
+    if klass == "denied":
+        raise ValueError("refusing to call %r: %s"
+                         % (rule, DENIAL_REASONS.get(rule, "denied by this skill")))
+    for name in sorted(params or {}):
+        reason = REFUSED_PARAMS.get(rule, {}).get(name)
+        if reason:
+            raise ValueError("refusing to send %r to %r: %s" % (name, rule, reason))
+    url = "%s/%s/lgbk%s" % (BASE, prefix, _fill_rule(rule, path_params))
+    return session.get(url, params=params or {}, timeout=timeout, stream=stream)
 
 
 def _unwrap(response):
@@ -463,7 +714,7 @@ def readable_experiments(session, cred, refresh=False):
                 and cached.get("version") == CACHE_VERSION):
             return cached["records"]
 
-    response = _get(session, cred["prefix"], "experiments", timeout=300)
+    response = _get(session, cred["prefix"], R_EXPERIMENTS, timeout=300)
     response.raise_for_status()
     records = []
     for exp in _unwrap(response):
@@ -492,7 +743,7 @@ def recently_active_names(session, days):
     DATA -- an experiment can have recent eLog entries without new runs.  That
     caveat is printed with the scope line, never hidden.
     """
-    response = _get(session, "ws", "experiment_names_updated_within",
+    response = _get(session, "ws", R_NAMES_UPDATED_WITHIN,
                     params={"offset_secs": int(days * 86400)}, timeout=120)
     response.raise_for_status()
     return set(_unwrap(response))
@@ -602,8 +853,9 @@ def search_one(session, cred, experiment, args):
     params = {"search_text": args.query}
     started = time.time()
     try:
-        response = _get(session, cred["prefix"], "search_elog",
-                        experiment=experiment, params=params, timeout=args.timeout)
+        response = _get(session, cred["prefix"], R_SEARCH_ELOG,
+                        path_params={"experiment_name": experiment},
+                        params=params, timeout=args.timeout)
     except Exception as exc:                                  # noqa: BLE001
         return experiment, type(exc).__name__, [], time.time() - started
     elapsed = time.time() - started
@@ -1062,6 +1314,392 @@ def cmd_search(args):
     return 0
 
 
+# --------------------------------------------------------------------------
+# route inventory + the generic reader
+# --------------------------------------------------------------------------
+
+def _resolve_rule(text):
+    """Accept a full route rule, or the shortest unambiguous tail of one.
+
+    `runs` is what a person types; `/lgbk/<experiment_name>/ws/runs` is what the
+    server routes on.  Resolving here keeps the inventory the single source of
+    truth -- there is no second table of nicknames to drift out of step.
+    """
+    if text in ROUTE_CLASS:
+        return text
+    wanted = text.strip("/")
+    hits = [rule for rule in ROUTE_CLASS
+            if rule.strip("/").endswith("/" + wanted) or rule.strip("/") == wanted]
+    if len(hits) == 1:
+        return hits[0]
+    if not hits:
+        raise ValueError(
+            "no explgbk route matches %r.  `elogsearch.py routes` lists all %d."
+            % (text, len(ROUTE_INVENTORY)))
+    raise ValueError("%r matches %d routes; name one exactly:\n    %s"
+                     % (text, len(hits), "\n    ".join(sorted(hits))))
+
+
+def _api(session, cred, rule, path_params=None, params=None, timeout=120):
+    """One read-only call, unwrapped.  Raises on a non-200 with the body attached."""
+    response = _get(session, cred["prefix"], rule, path_params=path_params,
+                    params=params, timeout=timeout)
+    if response.status_code != 200:
+        raise ValueError("%s returned HTTP %d: %s"
+                         % (rule, response.status_code, response.text[:200]))
+    return _unwrap(response)
+
+
+def _suppress_deleted(docs):
+    """Drop logically-deleted documents, returning (kept, how_many_suppressed).
+
+    Deletion in the eLog is logical: the delete route sets `deleted_by` and no
+    read query filters on it.  Every content-returning route in this script goes
+    through here, so nothing the API hands back can quote an entry someone
+    deliberately removed.
+    """
+    if not isinstance(docs, list):
+        return docs, 0
+    kept = [d for d in docs if not (isinstance(d, dict) and d.get("deleted_by"))]
+    return kept, len(docs) - len(kept)
+
+
+def cmd_routes(args):
+    """Print the vendored route inventory.  Offline: no credential, no network."""
+    order = ("denied", "mutating", "readonly")
+    titles = {
+        "denied": "DENIED -- read-only by the letter of the rule, refused anyway",
+        "mutating": "MUTATING -- accept GET and CHANGE SERVER STATE; never called",
+        "readonly": "READ-ONLY -- what this skill is permitted to call",
+    }
+    counts = dict((k, 0) for k in order)
+    for klass, _rule in ROUTE_INVENTORY:
+        counts[klass] += 1
+
+    print("explgbk GET routes, vendored from %s" % UPSTREAM_COMMIT)
+    print("classified by EFFECT, not by HTTP method: the include rule is")
+    print("'does not mutate eLog state'.")
+    print()
+    for klass in order:
+        if args.only and args.only != klass:
+            continue
+        print("%s  (%d)" % (titles[klass], counts[klass]))
+        for this, rule in ROUTE_INVENTORY:
+            if this != klass:
+                continue
+            print("  %s" % rule)
+            reason = DENIAL_REASONS.get(rule)
+            if reason and klass == "denied":
+                for line in _wrap(reason, 72):
+                    print("      %s" % line)
+        print()
+    print("allowed %d, mutating-refused %d, denied %d"
+          % (counts["readonly"], counts["mutating"], counts["denied"]))
+    return 0
+
+
+def _wrap(text, width):
+    words, line, out = text.split(), "", []
+    for word in words:
+        if line and len(line) + 1 + len(word) > width:
+            out.append(line)
+            line = word
+        else:
+            line = (line + " " + word) if line else word
+    if line:
+        out.append(line)
+    return out
+
+
+def cmd_get(args):
+    """Call one read-only route by name.  The long tail the recipes do not cover.
+
+    This is deliberately NOT an escape hatch from the policy: it goes through the
+    same `_get()` as everything else, so a mutating or denied route is refused
+    here exactly as it is refused everywhere.
+    """
+    import requests
+    rule = _resolve_rule(args.route)
+    path_params = dict(_pair(p, "--path") for p in (args.path or []))
+    if args.experiment and "<experiment_name>" in rule:
+        path_params.setdefault("experiment_name", args.experiment)
+    params = dict(_pair(p, "--param") for p in (args.param or []))
+
+    cred = resolve_credential(args.auth)
+    session = requests.Session()
+    session.headers.update(auth_headers(cred))
+    started = time.time()
+    response = _get(session, cred["prefix"], rule, path_params=path_params,
+                    params=params, timeout=args.timeout)
+    elapsed = time.time() - started
+    print("route  : %s" % rule)
+    print("status : %d   bytes %d   %.3fs   %s"
+          % (response.status_code, len(response.content), elapsed,
+             response.headers.get("Content-Type", "")))
+    print()
+    if response.status_code != 200:
+        print(response.text[:2000])
+        return 1
+    try:
+        payload = _unwrap(response)
+    except ValueError:
+        print(response.text[:args.chars])
+        return 0
+    if args.suppress_deleted:
+        payload, dropped = _suppress_deleted(payload)
+        if dropped:
+            print("(%d logically-deleted document(s) suppressed)" % dropped)
+    text = json.dumps(payload, indent=2, default=str)
+    if args.limit and isinstance(payload, list) and len(payload) > args.limit:
+        text = json.dumps(payload[:args.limit], indent=2, default=str)
+        print("(showing the first %d of %d; raise with --limit)"
+              % (args.limit, len(payload)))
+    print(text[:args.chars] if args.chars else text)
+    return 0
+
+
+def _pair(text, flag):
+    if "=" not in text:
+        raise ValueError("%s expects key=value, got %r" % (flag, text))
+    key, value = text.split("=", 1)
+    return key, value
+
+
+# --------------------------------------------------------------------------
+# eLog reading -- entries, threads, tags, logbooks, attachments
+# --------------------------------------------------------------------------
+
+R_ELOG = "/lgbk/<experiment_name>/ws/elog"
+R_ELOG_TREE = "/lgbk/<experiment_name>/ws/elog/<entry_id>/complete_elog_tree"
+R_ELOG_TAGS = "/lgbk/<experiment_name>/ws/get_elog_tags"
+R_INSTRUMENT_ELOGS = "/lgbk/<experiment_name>/ws/get_instrument_elogs"
+R_ATTACHMENT = "/lgbk/<experiment_name>/ws/attachment"
+
+# The whole-logbook route has NO server-side limit, so the cap lives here.  This
+# is the same failure the empty-query refusal already closed for search: a route
+# that will happily return an entire experiment's logbook is a load event unless
+# the client bounds it.
+ENTRIES_CAP = 200
+
+
+def cmd_entries(args):
+    """The newest entries of one logbook, capped, with deletions suppressed."""
+    import requests
+    cred = resolve_credential(args.auth)
+    session = requests.Session()
+    session.headers.update(auth_headers(cred))
+    docs = _api(session, cred, R_ELOG,
+                path_params={"experiment_name": args.experiment},
+                timeout=args.timeout)
+    returned = len(docs) if isinstance(docs, list) else 0
+    docs, dropped = _suppress_deleted(docs)
+    docs = sorted(docs, key=lambda d: d.get("relevance_time") or d.get("insert_time") or "",
+                  reverse=True)
+    limit = min(args.limit, ENTRIES_CAP)
+    print("experiment : %s" % args.experiment)
+    print("identity   : %s (%s)" % (cred["identity"], cred["prefix"]))
+    print("route      : %s  (whole logbook; the server applies no limit)" % R_ELOG)
+    print("returned   : %d entries; %d suppressed as deleted; showing newest %d"
+          % (returned, dropped, min(limit, len(docs))))
+    print()
+    for doc in docs[:limit]:
+        print_entry(args.experiment, doc, "entry", args.chars)
+    return 0
+
+
+def cmd_thread(args):
+    """One entry with its complete thread, the server's own tree walk."""
+    import requests
+    cred = resolve_credential(args.auth)
+    session = requests.Session()
+    session.headers.update(auth_headers(cred))
+    docs = _api(session, cred, R_ELOG_TREE,
+                path_params={"experiment_name": args.experiment,
+                             "entry_id": args.entry_id},
+                timeout=args.timeout)
+    if isinstance(docs, dict):
+        docs = [docs]
+    returned = len(docs)
+    docs, dropped = _suppress_deleted(docs)
+    docs = sorted(docs, key=lambda d: d.get("insert_time") or "")
+    print("experiment : %s" % args.experiment)
+    print("entry      : %s" % args.entry_id)
+    print("thread     : %d document(s); %d suppressed as deleted" % (returned, dropped))
+    print()
+    for doc in docs:
+        kind = "entry" if doc.get("_id") == args.entry_id else "thread"
+        print_entry(args.experiment, doc, kind, args.chars)
+    return 0
+
+
+def cmd_tags(args):
+    """The tag vocabulary of one logbook -- what `t:` searches can match."""
+    import requests
+    cred = resolve_credential(args.auth)
+    session = requests.Session()
+    session.headers.update(auth_headers(cred))
+    tags = _api(session, cred, R_ELOG_TAGS,
+                path_params={"experiment_name": args.experiment},
+                timeout=args.timeout)
+    print("experiment : %s" % args.experiment)
+    print("tags       : %d" % (len(tags) if hasattr(tags, "__len__") else 0))
+    print()
+    for tag in sorted(tags or []):
+        print("  %s" % tag)
+    print()
+    print("Tags are case-SENSITIVE, as the server stores them.")
+    return 0
+
+
+def cmd_logbooks(args):
+    """The standing operational logbooks -- the ones recency can never reach.
+
+    With --experiment it asks the server which logbooks that experiment posts
+    into.  Without one it lists the standing logbooks from the caller's own
+    readable set, selected by the property that actually identifies them: their
+    display name differs from their URL key.  The recency rule cannot find them
+    because they have no runs.
+    """
+    import requests
+    cred = resolve_credential(args.auth)
+    session = requests.Session()
+    session.headers.update(auth_headers(cred))
+    if args.experiment:
+        elogs = _api(session, cred, R_INSTRUMENT_ELOGS,
+                     path_params={"experiment_name": args.experiment},
+                     timeout=args.timeout)
+        print("experiment : %s" % args.experiment)
+        print("route      : %s" % R_INSTRUMENT_ELOGS)
+        print()
+        print(json.dumps(elogs, indent=2, default=str)[:args.chars])
+        return 0
+    records = readable_experiments(session, cred, refresh=args.refresh)
+    standing = [r for r in records if r.get("key") and r["name"] != r["key"]]
+    print("identity : %s (%s)" % (cred["identity"], cred["prefix"]))
+    print("standing operational logbooks readable by you: %d of %d experiments"
+          % (len(standing), len(records)))
+    print("(selected by display-name != key; they have no runs, so the recency")
+    print(" rule and --instrument cannot reach them)")
+    print()
+    for record in sorted(standing, key=lambda r: r["name"]):
+        print("  %-28s  key %s" % (record["name"], record["key"]))
+    return 0
+
+
+# An attachment's recorded `type` is whatever the uploader's browser claimed.  It
+# is untrusted input, so the saved extension comes from this map and never from
+# the server's string.
+ATTACHMENT_EXTENSIONS = {
+    "image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg",
+    "image/gif": ".gif", "image/bmp": ".bmp", "image/tiff": ".tif",
+    "image/webp": ".webp", "image/svg+xml": ".svg",
+    "application/pdf": ".pdf", "application/json": ".json",
+    "application/zip": ".zip", "application/gzip": ".gz",
+    "application/x-hdf5": ".h5", "application/octet-stream": ".bin",
+    "text/plain": ".txt", "text/csv": ".csv", "text/html": ".html",
+}
+
+# The server returns a generic icon INSTEAD of the attachment whenever a preview
+# is asked for and the attachment has none (services/explgbk.py:1165, a bare
+# `send_file('static/attachment.png')`).  It arrives as an ordinary image/png
+# with no marker of any kind, so it cannot be recognised from the response.  The
+# skill therefore looks the attachment up first and refuses the preview when the
+# record has no `preview_url` -- the only place the difference is visible.
+#
+# One attachment per invocation, on purpose.  Attachment bytes come from the
+# image store, not the logbook database; fanning out over them turns a query into
+# a transfer.
+ATTACHMENT_MAX_BYTES = 64 * 1024 * 1024
+
+
+def _find_attachment(session, cred, experiment, entry_id, attachment_id, timeout):
+    """The attachment's own record, from the entry that carries it.
+
+    The fetch route takes entry_id AND attachment_id and joins them server-side,
+    so the entry has to be read anyway to ask a sensible question.  Reading it
+    here also surfaces `preview_url`, which is the only way to know in advance
+    that --preview would return the placeholder icon.
+    """
+    docs = _api(session, cred, R_ELOG_TREE,
+                path_params={"experiment_name": experiment, "entry_id": entry_id},
+                timeout=timeout)
+    if isinstance(docs, dict):
+        docs = [docs]
+    for doc in docs or []:
+        if doc.get("_id") != entry_id:
+            continue
+        for attachment in doc.get("attachments") or []:
+            if str(attachment.get("_id")) == attachment_id:
+                return attachment
+    return None
+
+
+def cmd_attachment(args):
+    """Fetch ONE attachment to a path the caller named.  Never a side effect."""
+    import requests
+    cred = resolve_credential(args.auth)
+    session = requests.Session()
+    session.headers.update(auth_headers(cred))
+
+    record = _find_attachment(session, cred, args.experiment, args.entry_id,
+                              args.attachment_id, args.timeout)
+    if record is None:
+        print("entry %s in %s carries no attachment %s"
+              % (args.entry_id, args.experiment, args.attachment_id))
+        return 1
+    print("experiment  : %s" % args.experiment)
+    print("entry       : %s" % args.entry_id)
+    print("attachment  : %s   %s" % (args.attachment_id, record.get("name") or "?"))
+    print("server type : %s   (recorded at upload; not trusted for the filename)"
+          % record.get("type"))
+    if args.preview and not record.get("preview_url"):
+        print()
+        print("REFUSING --preview: this attachment has no preview, and the server")
+        print("answers that case with its generic placeholder icon rather than an")
+        print("error.  Re-run without --preview for the real bytes.")
+        return 1
+
+    params = {"entry_id": args.entry_id, "attachment_id": args.attachment_id}
+    if args.preview:
+        params["prefer_preview"] = "true"
+    started = time.time()
+    response = _get(session, cred["prefix"], R_ATTACHMENT,
+                    path_params={"experiment_name": args.experiment},
+                    params=params, timeout=args.timeout)
+    body = response.content
+    elapsed = time.time() - started
+    ctype = (response.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+    print("status      : %d   bytes %d   %.3fs   %s"
+          % (response.status_code, len(body), elapsed, ctype))
+    disposition = response.headers.get("Content-Disposition")
+    if disposition:
+        print("disposition : %s" % disposition)
+    if response.status_code != 200:
+        return 1
+    if len(body) > ATTACHMENT_MAX_BYTES:
+        print()
+        print("REFUSING to save %d bytes: over this skill\'s %d-byte cap."
+              % (len(body), ATTACHMENT_MAX_BYTES))
+        return 2
+    if not args.out:
+        print()
+        print("Not saved: no --out given.  Writing an attachment to disk is a")
+        print("deliberate act, so this skill only does it when you name the path.")
+        return 0
+    out = args.out
+    if os.path.isdir(out):
+        out = os.path.join(out, args.attachment_id)
+    root, ext = os.path.splitext(out)
+    if not ext:
+        out = root + ATTACHMENT_EXTENSIONS.get(ctype, ".bin")
+    with open(out, "wb") as handle:
+        handle.write(body)
+    print()
+    print("saved       : %s  (%d bytes)" % (out, len(body)))
+    print("extension chosen from this skill\'s own type map, not the server\'s string.")
+    return 0
+
+
 SELFTEST_CASES = [
     ("a thread ancestor that does not match is context",
      [{"_id": "A", "content": "setting up the sample delivery"},
@@ -1129,28 +1767,214 @@ SELFTEST_CASES = [
 ]
 
 
-def cmd_selftest(_args):
-    """Check the result classifier offline.  No credential, no network, no eLog."""
-    failures = 0
+# --------------------------------------------------------------------------
+# selftest -- three groups, all offline, no credential and no network
+# --------------------------------------------------------------------------
+#
+#   1. the result classifier, on hand-built documents
+#   2. the route policy: every mutating and denied route is refused by _get()
+#      BEFORE a socket is opened, plus the pin against the vendored upstream list
+#   3. every subcommand: it is registered, and every route it calls is still
+#      classified read-only
+#
+# Group 2 is why this file exists in the shape it does.  The refusals must be
+# provable without calling the production logbook, because demonstrating them
+# live would mean ending a run or closing a shift to show that the skill can.
+
+
+class _NoHTTPSession(object):
+    """A session stand-in that makes any attempted request a test failure.
+
+    _get() checks the route class before it builds a URL, so a correctly refused
+    route never reaches this object.  If one ever does, the test says so instead
+    of quietly succeeding.
+    """
+
+    def get(self, *_args, **_kwargs):
+        raise AssertionError(
+            "HTTP was attempted for a route that must be refused offline")
+
+
+def _reference_path():
+    here = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(here, os.pardir, "reference", "explgbk-get-routes.txt")
+
+
+def _read_reference_routes():
+    """The checked-in copy of upstream's GET route list: {rule: methods}."""
+    routes = {}
+    with open(_reference_path()) as handle:
+        for line in handle:
+            line = line.rstrip("\n")
+            if not line or line.startswith("#"):
+                continue
+            methods, _, rule = line.partition("\t")
+            routes[rule] = tuple(methods.split(","))
+    return routes
+
+
+# One case per subcommand: the routes it reaches, which the policy must still
+# permit.  A policy edit that would break a subcommand fails here rather than in
+# front of a user mid-question.
+SUBCOMMAND_CASES = [
+    ("whoami", [R_EXPERIMENTS]),
+    ("scope", [R_EXPERIMENTS, R_NAMES_UPDATED_WITHIN]),
+    ("search", [R_SEARCH_ELOG]),
+    ("routes", []),
+    ("get", []),
+    ("entries", [R_ELOG]),
+    ("thread", [R_ELOG_TREE]),
+    ("tags", [R_ELOG_TAGS]),
+    ("logbooks", [R_INSTRUMENT_ELOGS]),
+    ("attachment", [R_ATTACHMENT, R_ELOG_TREE]),
+]
+
+
+def _selftest_classifier():
+    results = []
     for name, docs, query, want_m, want_c, want_d in SELFTEST_CASES:
         split = classify(docs, query)
         got_m = sorted(d["_id"] for d in split["matches"])
         got_c = sorted(d["_id"] for d in split["context"])
         ok = (got_m == sorted(want_m) and got_c == sorted(want_c)
               and split["suppressed_deleted"] == want_d)
-        failures += 0 if ok else 1
-        print("%s %s" % ("PASS" if ok else "FAIL", name))
+        detail = ""
         if not ok:
-            print("     wanted matches=%s context=%s deleted=%d"
-                  % (sorted(want_m), sorted(want_c), want_d))
-            print("     got    matches=%s context=%s deleted=%d"
-                  % (got_m, got_c, split["suppressed_deleted"]))
-    print()
-    print("%d of %d cases passed" % (len(SELFTEST_CASES) - failures, len(SELFTEST_CASES)))
+            detail = ("\n     wanted matches=%s context=%s deleted=%d"
+                      "\n     got    matches=%s context=%s deleted=%d"
+                      % (sorted(want_m), sorted(want_c), want_d,
+                         got_m, got_c, split["suppressed_deleted"]))
+        results.append((ok, name, detail))
+    return results
+
+
+def _selftest_policy():
+    results = []
+    session = _NoHTTPSession()
+    for klass, rule in ROUTE_INVENTORY:
+        if klass == "readonly":
+            continue
+        label = "%s route refused offline: %s" % (klass, rule)
+        try:
+            _get(session, "ws-jwt", rule,
+                 path_params={"experiment_name": "x", "run_num": "1", "entry_id": "e",
+                              "job_id": "j", "path": "p", "prjid": "p", "gridid": "g",
+                              "sample_name": "s", "insid": "i"})
+            results.append((False, label, "\n     _get() returned instead of raising"))
+        except ValueError as exc:
+            expected = "CHANGES SERVER STATE" if klass == "mutating" else "refusing to call"
+            ok = expected in str(exc)
+            results.append((ok, label,
+                            "" if ok else "\n     raised, but not with the %s reason: %s"
+                            % (klass, exc)))
+        except AssertionError as exc:
+            results.append((False, label, "\n     %s" % exc))
+
+    # The parameter-level refusal.  One read-only route carries a query parameter
+    # that changes shared server-side state, so route class alone is not a fine
+    # enough guarantee, and the test has to prove the finer one too.
+    for rule, refused in sorted(REFUSED_PARAMS.items()):
+        for name in sorted(refused):
+            label = "parameter refused offline: %s?%s" % (rule, name)
+            try:
+                _get(session, "ws-jwt", rule, params={name: "1"})
+                results.append((False, label, "\n     _get() returned instead of raising"))
+            except ValueError as exc:
+                ok = "refusing to send" in str(exc)
+                results.append((ok, label,
+                                "" if ok else "\n     raised for another reason: %s" % exc))
+            except AssertionError as exc:
+                results.append((False, label, "\n     %s" % exc))
+
+    # The pin.  A deny-list model is permissive by construction: a future explgbk
+    # release adding a 28th mutating GET would land inside the allowed set in
+    # silence.  This is the tripwire, and it is the reason the upstream list is
+    # vendored under reference/ instead of being trusted from memory.
+    label = "inventory pin: vendored routes == reference/explgbk-get-routes.txt"
+    try:
+        reference = _read_reference_routes()
+        vendored = set(ROUTE_CLASS)
+        missing = sorted(set(reference) - vendored)
+        extra = sorted(vendored - set(reference))
+        ok = not missing and not extra
+        detail = ""
+        if not ok:
+            detail = ("\n     %d upstream route(s) absent from the inventory: %s"
+                      "\n     %d inventory route(s) absent upstream: %s"
+                      % (len(missing), ", ".join(missing[:5]) or "-",
+                         len(extra), ", ".join(extra[:5]) or "-"))
+        results.append((ok, label, detail))
+    except (OSError, IOError) as exc:
+        results.append((False, label, "\n     cannot read %s: %s" % (_reference_path(), exc)))
+    return results
+
+
+def _selftest_subcommands():
+    results = []
+    parser = build_parser()
+    registered = set()
+    for action in parser._subparsers._group_actions:              # noqa: SLF001
+        registered.update(action.choices)
+    for name, rules in SUBCOMMAND_CASES:
+        label = "subcommand %-11s registered, and its routes still read-only" % name
+        problems = []
+        if name not in registered:
+            problems.append("not registered in the parser")
+        for rule in rules:
+            klass = ROUTE_CLASS.get(rule)
+            if klass != "readonly":
+                problems.append("%s is classified %s" % (rule, klass))
+        if name == "routes":
+            # The summary line is a done-condition of this skill, so it is tested
+            # rather than trusted: the three counts must partition the inventory.
+            counts = {}
+            for klass, _rule in ROUTE_INVENTORY:
+                counts[klass] = counts.get(klass, 0) + 1
+            if sum(counts.values()) != len(ROUTE_INVENTORY):
+                problems.append("class counts do not partition the inventory")
+            if counts.get("denied") != len(DENIAL_REASONS):
+                problems.append("%d denied routes but %d denial reasons"
+                                % (counts.get("denied", 0), len(DENIAL_REASONS)))
+        if name == "get":
+            # The tail-resolver must not become a way around the policy: a
+            # mutating route still resolves, and _get() still refuses it.
+            if _resolve_rule("runs") != "/lgbk/<experiment_name>/ws/runs":
+                problems.append("'runs' does not resolve to the runs route")
+            mutating_rule = _resolve_rule("end_run")
+            if ROUTE_CLASS.get(mutating_rule) != "mutating":
+                problems.append("'end_run' does not resolve to a mutating route")
+            try:
+                _get(_NoHTTPSession(), "ws-jwt", mutating_rule,
+                     path_params={"experiment_name": "x"})
+                problems.append("get resolved a mutating route and did not refuse it")
+            except ValueError:
+                pass
+        results.append((not problems, label,
+                        "" if not problems else "\n     " + "; ".join(problems)))
+    return results
+
+
+def cmd_selftest(_args):
+    """Check the classifier, the route policy and the subcommands.  All offline."""
+    groups = [
+        ("result classifier", _selftest_classifier()),
+        ("route policy (refusals proven without any HTTP call)", _selftest_policy()),
+        ("subcommands", _selftest_subcommands()),
+    ]
+    total = failures = 0
+    for title, results in groups:
+        print("-- %s" % title)
+        for ok, name, detail in results:
+            total += 1
+            failures += 0 if ok else 1
+            print("%s %s%s" % ("PASS" if ok else "FAIL", name, detail))
+        print()
+    print("%d of %d cases passed" % (total - failures, total))
     return 1 if failures else 0
 
 
-def main():
+def build_parser():
+    """The CLI, built separately so `selftest` can inspect it without running it."""
     parser = argparse.ArgumentParser(
         prog="elogsearch.py",
         description="Search the LCLS eLog as yourself, read-only, with scope stated.")
@@ -1218,7 +2042,94 @@ def main():
                         help="per-experiment HTTP timeout in seconds")
     search.set_defaults(func=cmd_search)
 
-    args = parser.parse_args()
+    rt = sub.add_parser("routes",
+                        help="the vendored explgbk route inventory and what this "
+                             "skill will and will not call (offline)")
+    rt.add_argument("--only", choices=["readonly", "mutating", "denied"], default=None,
+                    help="print just one class")
+    rt.set_defaults(func=cmd_routes)
+
+    gt = sub.add_parser("get",
+                        help="call one read-only route by name -- the long tail the "
+                             "named subcommands do not cover")
+    add_global_flags(gt)
+    gt.add_argument("route",
+                    help="route rule, or its unambiguous tail (e.g. 'runs', "
+                         "'run_tables', 'ws/instruments')")
+    gt.add_argument("--experiment", default=None,
+                    help="fills <experiment_name> for a per-experiment route")
+    gt.add_argument("--path", action="append", default=None, metavar="KEY=VALUE",
+                    help="fill another path parameter, e.g. --path run_num=45")
+    gt.add_argument("--param", action="append", default=None, metavar="KEY=VALUE",
+                    help="query parameter, repeatable")
+    gt.add_argument("--limit", type=int, default=20,
+                    help="print at most N list elements (default 20)")
+    gt.add_argument("--chars", type=int, default=6000,
+                    help="truncate the printed JSON at N characters (0 = no limit)")
+    gt.add_argument("--suppress-deleted", dest="suppress_deleted", action="store_true",
+                    help="drop logically-deleted documents from a list result")
+    gt.add_argument("--timeout", type=int, default=120)
+    gt.set_defaults(func=cmd_get)
+
+    en = sub.add_parser("entries",
+                        help="the newest entries of one logbook, capped and with "
+                             "deleted entries suppressed")
+    add_global_flags(en)
+    en.add_argument("experiment")
+    en.add_argument("--limit", type=int, default=20,
+                    help="entries to print, newest first (default 20, cap %d)"
+                         % ENTRIES_CAP)
+    en.add_argument("--chars", type=int, default=EXCERPT_CHARS)
+    en.add_argument("--timeout", type=int, default=300)
+    en.set_defaults(func=cmd_entries)
+
+    th = sub.add_parser("thread",
+                        help="one entry with its complete thread, as the server "
+                             "walks it")
+    add_global_flags(th)
+    th.add_argument("experiment")
+    th.add_argument("entry_id")
+    th.add_argument("--chars", type=int, default=EXCERPT_CHARS)
+    th.add_argument("--timeout", type=int, default=120)
+    th.set_defaults(func=cmd_thread)
+
+    tg = sub.add_parser("tags", help="the tag vocabulary of one logbook")
+    add_global_flags(tg)
+    tg.add_argument("experiment")
+    tg.add_argument("--timeout", type=int, default=120)
+    tg.set_defaults(func=cmd_tags)
+
+    lb = sub.add_parser("logbooks",
+                        help="the standing operational logbooks recency cannot reach")
+    add_global_flags(lb)
+    lb.add_argument("--experiment", default=None,
+                    help="instead ask which logbooks this experiment posts into")
+    lb.add_argument("--chars", type=int, default=6000)
+    lb.add_argument("--timeout", type=int, default=120)
+    lb.set_defaults(func=cmd_logbooks)
+
+    at = sub.add_parser("attachment",
+                        help="fetch ONE attachment to a path you name")
+    add_global_flags(at)
+    at.add_argument("experiment")
+    at.add_argument("entry_id", help="the eLog entry that carries the attachment")
+    at.add_argument("attachment_id",
+                    help="the attachment's _id, as it appears in that entry's "
+                         "attachments array")
+    at.add_argument("--out", default=None,
+                    help="save here.  Without it nothing is written: putting an "
+                         "attachment on disk is a deliberate act, never a side "
+                         "effect of reading")
+    at.add_argument("--preview", action="store_true",
+                    help="ask for the preview rendition instead of the original")
+    at.add_argument("--timeout", type=int, default=300)
+    at.set_defaults(func=cmd_attachment)
+
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
     try:
         return args.func(args)
     except CredentialError as exc:
