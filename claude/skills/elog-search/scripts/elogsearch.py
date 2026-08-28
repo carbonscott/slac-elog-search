@@ -63,7 +63,7 @@ BASE = "https://pswww.slac.stanford.edu"
 # The inventory is VENDORED, not discovered at run time.  A copy of the upstream
 # route list is checked in at reference/explgbk-get-routes.txt and `selftest`
 # fails when the two disagree.  That pin is the whole mitigation for the one
-# weakness of a deny-list model: a future explgbk release adding a 28th mutating
+# weakness of a deny-list model: a future explgbk release adding a 27th mutating
 # GET would otherwise fall inside the permitted set in silence.
 
 ROUTE_INVENTORY = (
@@ -3212,7 +3212,7 @@ def _selftest_policy():
         results.append((False, label, "\n     %s: %s" % (type(exc).__name__, exc)))
 
     # The pin.  A deny-list model is permissive by construction: a future explgbk
-    # release adding a 28th mutating GET would land inside the allowed set in
+    # release adding a 27th mutating GET would land inside the allowed set in
     # silence.  This is the tripwire, and it is the reason the upstream list is
     # vendored under reference/ instead of being trusted from memory.
     label = "inventory pin: vendored routes == reference/explgbk-get-routes.txt"
