@@ -1569,6 +1569,20 @@ def cmd_search(args):
     except ValueError as exc:
         print("REFUSING: %s" % exc, file=sys.stderr)
         return 2
+    # LAST on purpose, and it must stay after the transport arm: requests'
+    # RequestException subclasses OSError, and a network failure has to keep
+    # reading as SERVER ERROR rather than as a local write failure.  What is
+    # left here is the caller's own filesystem -- a missing parent directory in
+    # --out, a read-only mount, a full disk, a permission denial.  That is
+    # neither a refusal by this skill (2) nor anything the server did (4), so it
+    # gets its own code rather than a bare traceback, which tells the caller
+    # nothing at all.
+    except OSError as exc:
+        print("LOCAL WRITE FAILED: %s: %s" % (type(exc).__name__, exc),
+              file=sys.stderr)
+        print("  The data was fetched; this skill could not write it to the path "
+              "you named.  The server is not involved.", file=sys.stderr)
+        return 5
     cred = resolve_credential(args.auth)
     session = new_session(cred)
 
@@ -3752,6 +3766,15 @@ def _selftest_logic():
          "main() catches ServerError before ValueError, so it never prints REFUSING")
     case("return 4" in source.split("except ServerError")[1].split("except ValueError")[0],
          "a server-side failure exits 4, not the 2 reserved for policy refusals")
+    # A --out write that the local filesystem refuses is neither a refusal by
+    # this skill nor anything the server did, and a traceback says neither.
+    case("except OSError" in source and "return 5" in source,
+         "a local write failure exits 5 instead of raising a bare traceback")
+    case(source.index("except OSError") > source.index("_transport_error_types"),
+         "the OSError arm sits after the transport arm, so a network failure "
+         "still reads as SERVER ERROR")
+    case(source.count("return 5") == 1,
+         "exit code 5 is used for exactly one outcome")
 
     # Credential expiry ranking, and the mode refusal, both previously uncovered.
     case(_sortable("12/31/2026 10:00:00") > _sortable("nonsense"),
@@ -4647,6 +4670,20 @@ def main():
     except ValueError as exc:
         print("REFUSING: %s" % exc, file=sys.stderr)
         return 2
+    # LAST on purpose, and it must stay after the transport arm: requests'
+    # RequestException subclasses OSError, and a network failure has to keep
+    # reading as SERVER ERROR rather than as a local write failure.  What is
+    # left here is the caller's own filesystem -- a missing parent directory in
+    # --out, a read-only mount, a full disk, a permission denial.  That is
+    # neither a refusal by this skill (2) nor anything the server did (4), so it
+    # gets its own code rather than a bare traceback, which tells the caller
+    # nothing at all.
+    except OSError as exc:
+        print("LOCAL WRITE FAILED: %s: %s" % (type(exc).__name__, exc),
+              file=sys.stderr)
+        print("  The data was fetched; this skill could not write it to the path "
+              "you named.  The server is not involved.", file=sys.stderr)
+        return 5
 
 
 if __name__ == "__main__":

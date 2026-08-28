@@ -33,8 +33,11 @@ an oversized attachment, an existing `--out` file without `--force`), and argpar
 refusals such as two conflicting flags · `3` `CREDENTIAL BLOCKED` · `4` **`SERVER ERROR`**:
 the call was made and the far end declined or answered oddly — any non-200 raised through
 `_api` (so every subcommand not in the `1` list above), a body that is not JSON, or a
-transport failure. `REFUSING:` means this skill stopped the call; `SERVER ERROR:` means it
-did not. One asymmetry worth
+transport failure · `5` **`LOCAL WRITE FAILED`**: the data was fetched but this skill could
+not write it to the `--out` path you named — a missing parent directory, a read-only mount,
+a full disk, a permission denial. `REFUSING:` means this skill stopped the call;
+`SERVER ERROR:` means it did not; `LOCAL WRITE FAILED:` means the call succeeded and your
+own filesystem did not. One asymmetry worth
 knowing: `scope` exits `0` when it selects nothing where `search` exits `1`. A non-positive
 `--limit` is refused by every subcommand — as a slice bound it would widen the output rather
 than narrow it.
