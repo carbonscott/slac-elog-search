@@ -263,6 +263,30 @@ R_NAMES_UPDATED_WITHIN = "/lgbk/ws/experiment_names_updated_within"
 R_SEARCH_ELOG = "/lgbk/<experiment_name>/ws/search_elog"
 # <<< ROUTE POLICY <<<
 
+# The second policy table: PATH parameters, not query parameters.
+#
+# Exactly one rule in the inventory takes a path component that names an
+# operation on ANOTHER service -- the workflow proxy hands `action` to the job
+# daemon.  That constraint used to live in cmd_workflows and in argparse
+# `choices`, which meant `get` did not inherit it: the generic route caller could
+# send an unlisted action and nothing but the server's 405 stood in the way.
+# cmd_get's docstring promises a route is refused there exactly as it is refused
+# everywhere, so the constraint belongs here, in the choke point, beside
+# REFUSED_PARAMS.
+#
+# The server refuses anything else with 405 ("for security reasons, action %s is
+# not proxied thru the logbook").  Checking here too means the refusal costs no
+# round trip and reads the same as every other refusal in this skill.
+WORKFLOW_ACTIONS = ("job_statuses", "job_details", "job_log_file")
+
+ALLOWED_PATH_VALUES = {
+    # R_WF_PROXY, spelled out: the named constants are defined further down, and
+    # a policy table must not depend on where in the file it sits.
+    "/lgbk/<experiment_name>/ws/workflow/<job_id>/<path:action>": {
+        "action": WORKFLOW_ACTIONS,
+    },
+}
+
 # Fan-out concurrency.  Fixed, not tunable from the command line: this is the
 # production logbook the hutches depend on during beam time, and a miss costs the
 # server a collection scan.  Four parallel requests was measured as safe.
@@ -734,7 +758,18 @@ def _get(session, prefix, rule, path_params=None, params=None, timeout=120,
         reason = REFUSED_PARAMS.get(rule, {}).get(name)
         if reason:
             raise ValueError("refusing to send %r to %r: %s" % (name, rule, reason))
-    url = "%s/%s/lgbk%s" % (BASE, prefix, _fill_rule(rule, path_params))
+    # After _fill_rule, which refuses a traversal inside a value: a dot-segment
+    # action is a path escape, and should be reported as one rather than as an
+    # unlisted action.  Still before any socket is opened.
+    filled = _fill_rule(rule, path_params)
+    for name, allowed in sorted(ALLOWED_PATH_VALUES.get(rule, {}).items()):
+        value = (path_params or {}).get(name)
+        if value is not None and value not in allowed:
+            raise ValueError(
+                "refusing to send %s=%r to %r: this path component selects an "
+                "operation on another service, and this skill permits only %s."
+                % (name, value, rule, ", ".join(allowed)))
+    url = "%s/%s/lgbk%s" % (BASE, prefix, filled)
     # allow_redirects=False is part of the read-only guarantee, not a transport
     # preference.  A redirect is a SECOND request, and this function classified
     # only the first: a 302 to another /lgbk/.../ws/... path would be followed
@@ -2109,10 +2144,8 @@ R_WF_DEFINITIONS = "/lgbk/<experiment_name>/ws/workflow_definitions"
 R_WF_TRIGGERS = "/lgbk/<experiment_name>/ws/workflow_triggers"
 R_WF_PROXY = "/lgbk/<experiment_name>/ws/workflow/<job_id>/<path:action>"
 
-# The server refuses anything else with 405 ("for security reasons, action %s is
-# not proxied thru the logbook").  Checking here too means the refusal costs no
-# round trip and reads the same as every other refusal in this skill.
-WORKFLOW_ACTIONS = ("job_statuses", "job_details", "job_log_file")
+# WORKFLOW_ACTIONS and its enforcement live with the route policy, up beside
+# REFUSED_PARAMS, so `get` inherits them too.
 
 # `runs` without this returns every run WITH its full parameter dictionary: 4.4 MB
 # for one 314-run experiment, measured.  The parameters are what `runtable` is
@@ -2671,6 +2704,44 @@ def _selftest_policy():
                                 "" if ok else "\n     raised for another reason: %s" % exc))
             except AssertionError as exc:
                 results.append((False, label, "\n     %s" % exc))
+
+    # The path-value allowlist, which `get` must inherit from the choke point
+    # rather than from cmd_workflows.  Declaration pinned as well as effect, for
+    # the same reason as legacy_cutoff above.
+    declared = ALLOWED_PATH_VALUES.get(
+        "/lgbk/<experiment_name>/ws/workflow/<job_id>/<path:action>", {}).get("action")
+    results.append((tuple(declared or ()) == tuple(WORKFLOW_ACTIONS),
+                    "the workflow action allowlist is declared in the policy table",
+                    "" if declared else "\n     ALLOWED_PATH_VALUES no longer covers it"))
+    for value, why in (("kill_job", "an action the daemon must never be asked for"),
+                       ("job_statuses_x", "a near-miss of a permitted action"),
+                       ("", "an empty action")):
+        label = "workflow action refused in _get(), not just in cmd_workflows: %r (%s)" % (
+            value, why)
+        try:
+            _get(session, "ws-jwt",
+                 "/lgbk/<experiment_name>/ws/workflow/<job_id>/<path:action>",
+                 path_params={"experiment_name": "x", "job_id": "j", "action": value})
+            results.append((False, label, "\n     _get() returned instead of raising"))
+        except ValueError as exc:
+            ok = "another service" in str(exc)
+            results.append((ok, label,
+                            "" if ok else "\n     raised for another reason: %s" % exc))
+        except AssertionError as exc:
+            results.append((False, label, "\n     %s" % exc))
+    label = "a permitted workflow action still passes the policy"
+    try:
+        _get(session, "ws-jwt",
+             "/lgbk/<experiment_name>/ws/workflow/<job_id>/<path:action>",
+             path_params={"experiment_name": "x", "job_id": "j",
+                          "action": "job_log_file"})
+        results.append((False, label, "\n     _get() returned without reaching HTTP"))
+    except AssertionError:
+        # The stand-in session raised, which is what reaching the HTTP layer
+        # means: the policy let a permitted action through.
+        results.append((True, label, ""))
+    except ValueError as exc:
+        results.append((False, label, "\n     a permitted action was refused: %s" % exc))
 
     # Path traversal.  This is the one hole the class check in _get() structurally
     # cannot see: the rule is read-only, and the escape happens inside a value.
