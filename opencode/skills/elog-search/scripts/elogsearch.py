@@ -1933,11 +1933,16 @@ def _find_attachment(session, cred, experiment, entry_id, attachment_id, timeout
                 timeout=timeout)
     if isinstance(docs, dict):
         docs = [docs]
+    # Both ids are compared as strings.  They arrive from the CLI as str and come
+    # back from Mongo as whatever the document holds; an entry _id that is not a
+    # str made this `continue` fire for every document, and the caller then
+    # reported "entry E carries no attachment A" -- a type mismatch wearing the
+    # face of missing data, exit 1 either way.
     for doc in docs or []:
-        if doc.get("_id") != entry_id:
+        if str(doc.get("_id")) != str(entry_id):
             continue
         for attachment in doc.get("attachments") or []:
-            if str(attachment.get("_id")) == attachment_id:
+            if str(attachment.get("_id")) == str(attachment_id):
                 return attachment
     return None
 
@@ -3785,6 +3790,18 @@ def _selftest_commands():
         globals()["readable_experiments"] = lambda *a, **k: [
             {"key": "AMO_Instrument", "name": "AMO Instrument"},
             {"key": "mfxlv4920", "name": "mfxlv4920"}]
+
+        # Ids are compared as strings on both halves: an entry _id that arrives
+        # as an int must still match the string a user typed, rather than
+        # reporting the attachment as absent.
+        int_entry = {"_id": 7, "attachments": [{"_id": 42, "name": "x"}]}
+        payloads["/lgbk/<experiment_name>/ws/elog/<entry_id>/complete_elog_tree"] = [int_entry]
+        found = _find_attachment(None, cred, "mfxlv4920", "7", "42", 5)
+        results.append((found is not None,
+                        "attachment lookup coerces a non-str entry _id",
+                        "" if found is not None else
+                        "\n     an int _id read as a missing attachment"))
+        payloads["/lgbk/<experiment_name>/ws/elog/<entry_id>/complete_elog_tree"] = [entry]
 
         for name, handler, extra in commands:
             label = "command runs and cannot be made to forge a line: %s" % name
