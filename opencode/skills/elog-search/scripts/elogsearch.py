@@ -2621,6 +2621,29 @@ def _read_reference_routes():
     return routes
 
 
+WRITE_METHODS = frozenset(("POST", "PUT", "PATCH", "DELETE"))
+
+
+def _readonly_with_write_methods(reference):
+    """Routes the inventory calls readonly that the vendored list shows taking a
+    write method.
+
+    The reference file records methods as well as rules, and the pin used to
+    compare rule NAMES only -- so the file could say GET,POST for a route
+    classified readonly and nothing would notice, which made the extra column
+    look like protection it was not providing.  Today all 87 readonly routes are
+    GET-only upstream and every GET,POST route is classified mutating, so this
+    is a real invariant and not a hopeful one.
+
+    It is also the drift the pin is for that the pin could otherwise miss: a
+    route that keeps its rule and acquires a write method upstream is exactly
+    the case re-vendoring would surface and a name-only comparison would swallow.
+    """
+    return sorted(rule for rule, methods in reference.items()
+                  if ROUTE_CLASS.get(rule) == "readonly"
+                  and WRITE_METHODS.intersection(m.strip().upper() for m in methods))
+
+
 # One case per subcommand: the routes it reaches, which the policy must still
 # permit.  A policy edit that would break a subcommand fails here rather than in
 # front of a user mid-question.
@@ -3402,19 +3425,25 @@ def _selftest_policy():
     # that forgets the reference file, or a re-vendoring that forgets to
     # classify.  A route explgbk adds upstream is refused by _get()'s
     # `klass is None` branch instead -- absent from the inventory means denied.
-    label = "inventory pin: vendored routes == reference/explgbk-get-routes.txt"
+    label = ("inventory pin: vendored routes == reference/explgbk-get-routes.txt, "
+             "and every readonly route is GET-only there")
     try:
         reference = _read_reference_routes()
         vendored = set(ROUTE_CLASS)
         missing = sorted(set(reference) - vendored)
         extra = sorted(vendored - set(reference))
-        ok = not missing and not extra
+        # The methods column, used rather than parsed and discarded: a route
+        # this skill calls must be GET-only upstream.
+        writable = _readonly_with_write_methods(reference)
+        ok = not missing and not extra and not writable
         detail = ""
         if not ok:
             detail = ("\n     %d upstream route(s) absent from the inventory: %s"
                       "\n     %d inventory route(s) absent upstream: %s"
+                      "\n     %d readonly route(s) taking a write method upstream: %s"
                       % (len(missing), ", ".join(missing[:5]) or "-",
-                         len(extra), ", ".join(extra[:5]) or "-"))
+                         len(extra), ", ".join(extra[:5]) or "-",
+                         len(writable), ", ".join(writable[:5]) or "-"))
         results.append((ok, label, detail))
     except (OSError, IOError) as exc:
         results.append((False, label, "\n     cannot read %s: %s" % (_reference_path(), exc)))
@@ -3649,6 +3678,17 @@ def _selftest_logic():
              "a path with no file there is written without ceremony")
     finally:
         os.remove(handle.name)
+
+    # The methods column has teeth: a readonly route recorded as GET,POST must be
+    # reported, or the pin is comparing names and calling it a check.
+    a_readonly = sorted(READONLY_ROUTES)[0]
+    case(_readonly_with_write_methods({a_readonly: ("GET", "POST")}) == [a_readonly],
+         "a readonly route with a write method upstream is flagged")
+    case(_readonly_with_write_methods({a_readonly: ("GET",)}) == [],
+         "a GET-only readonly route is not flagged")
+    case(_readonly_with_write_methods(
+        dict((r, ("GET", "POST")) for r in sorted(MUTATING_ROUTES)[:1])) == [],
+         "a mutating route's write method is not the drift this looks for")
 
     # key=value parsing for --path and --param.
     case(_pair("a=b", "--param") == ("a", "b"), "key=value splits on the first =")
