@@ -9,6 +9,7 @@ Search the LCLS eLog live, as **yourself**, read-only, and always say what was s
 
 ```bash
 SKILL_DIR=~/.claude/skills/elog-search   # wherever this SKILL.md lives
+source "$SKILL_DIR/env.sh"                          # puts the shared uv on PATH
 $SKILL_DIR/scripts/elogsearch.py whoami            # who am I, and what may I read?
 $SKILL_DIR/scripts/elogsearch.py selftest          # classifier, route policy, subcommands; offline
 $SKILL_DIR/scripts/elogsearch.py scope --days 180  # which experiments would a search cover?
@@ -16,6 +17,12 @@ $SKILL_DIR/scripts/elogsearch.py search "clog"     # search that scope
 $SKILL_DIR/scripts/elogsearch.py search "clog" --instrument cxi
 $SKILL_DIR/scripts/elogsearch.py search "timing" --experiments mfxlv4920,cxilv4418
 ```
+
+Source `env.sh` in the *same* bash command as the script — each command runs in a fresh
+shell, so a `source` from an earlier one is already gone. It puts the facility's shared
+`uv` on `PATH` (S3DF `/sdf/group/lcls/ds/dm/apps/dev/bin`, OLCF
+`/ccs/home/cwang31/.local/bin`) and sets a per-user uv cache, so these commands work
+without a personal `~/.local/bin/uv`.
 
 Set `SKILL_DIR` once and the commands run from any directory. Every example above was run
 and returns rows: `search "clog" --instrument cxi --days 180` gave 11 entries across 2
@@ -312,10 +319,10 @@ configured differently. It is not a problem and needs no action from you: report
 results, not the mechanism.
 
 Run scripts with **`uv`**, which the shebang does for you (`#!/usr/bin/env -S uv run
---script`). The system `python3` on some SLAC login nodes is too old, and the script
-declares its own dependencies (`requests`, `lcls-krtc`, `snowballstemmer`) in a PEP 723
-header that only uv
-reads.
+--script`) — and `env.sh`, sourced above, is what puts the facility's shared `uv` on your
+PATH for that shebang to find. The system `python3` on some SLAC login nodes is too old,
+and the script declares its own dependencies (`requests`, `lcls-krtc`, `snowballstemmer`)
+in a PEP 723 header that only uv reads.
 
 ## Choosing a route: which question needs which subcommand
 
