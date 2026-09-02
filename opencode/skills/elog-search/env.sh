@@ -19,7 +19,7 @@ if [ -d /sdf/group/lcls/ds/dm/apps/dev/python ]; then
 fi
 
 # uv cache per user (avoids permission issues in shared deploys)
-export UV_CACHE_DIR="${UV_CACHE_DIR:-/tmp/uv-cache-$USER}"
+export UV_CACHE_DIR="${UV_CACHE_DIR:-/tmp/uv-cache-${USER:-$(id -un)}}"
 
 # User overrides last
 if [ -f "$SKILL_DIR/env.local" ]; then
