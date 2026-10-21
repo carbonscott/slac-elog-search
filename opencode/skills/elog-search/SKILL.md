@@ -8,7 +8,7 @@ description: Answer questions about LCLS experiments from the pswww logbook, rea
 Search the LCLS eLog live, as **yourself**, read-only, and always say what was searched.
 
 ```bash
-SKILL_DIR=~/.claude/skills/elog-search   # wherever this SKILL.md lives
+SKILL_DIR="${CLAUDE_SKILL_DIR}"         # this skill's directory, filled in for you
 source "$SKILL_DIR/env.sh"                          # puts the shared uv on PATH
 $SKILL_DIR/scripts/elogsearch.py whoami            # who am I, and what may I read?
 $SKILL_DIR/scripts/elogsearch.py selftest          # classifier, route policy, subcommands; offline
@@ -24,7 +24,14 @@ shell, so a `source` from an earlier one is already gone. It puts the facility's
 `/ccs/home/cwang31/.local/bin`) and sets a per-user uv cache, so these commands work
 without a personal `~/.local/bin/uv`.
 
-Set `SKILL_DIR` once and the commands run from any directory. Every example above was run
+`SKILL_DIR` is the absolute path of the directory holding this `SKILL.md`.
+Claude Code fills it in when it loads the skill, and the shared opencode deployment
+has it written in at deploy time. If it is not an absolute path as you read it, use
+the "Base directory for this skill" path printed when the skill loaded. Do not guess
+`~/.claude/skills/elog-search`: claude-lcls keeps its skills under
+`~/.claude-lcls/skills`, and opencode under its own config directory.
+
+With `SKILL_DIR` set, the commands run from any directory. Every example above was run
 and returns rows: `search "clog" --instrument cxi --days 180` gave 11 entries across 2
 experiments on 2026-08-13.
 
